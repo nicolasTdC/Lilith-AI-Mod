@@ -257,6 +257,7 @@ public sealed class Plugin : BasePlugin
         TryCreateAndPatchAll(typeof(TrayMenuLocalizationPatch), PluginGuid + ".traylocalization", "tray localization hook");
         TryCreateAndPatchAll(typeof(VoiceSettingsButtonClickPatch), PluginGuid + ".voicelanguage", "voice language preference hook");
         TryCreateAndPatchAll(typeof(NewTraySettingsCompatibilityPatches), PluginGuid + ".newtraysettings", "new tray settings compatibility hooks");
+        TryCreateAndPatchAll(typeof(AudioManagerAiSpeechGuardPatch), PluginGuid + ".aispeechguard", "AI speech protection against idle voice");
         Log.LogInfo($"Loaded. Press {TextInputKey.Value} for text chat; hold {VoiceInputKey.Value} for push-to-talk voice input.");
         if (string.IsNullOrWhiteSpace(GeminiApiKey.Value))
             Log.LogWarning("Gemini ApiKey is empty. Set it in BepInEx/config/community.lilith.textinjector.cfg.");
@@ -397,6 +398,7 @@ internal static class DialogueManagerUpdatePatch
     private static float _nextAiNoteCheckAt;
     private static byte[]? _delayedSpeechAudio;
     private static float _delayedSpeechPlayAt = -1f;
+    private static float _aiSpeechProtectUntil = -1f;
     private static float _voicePitchResetAt = -1f;
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(90) };
     private static bool _requestInFlight;
@@ -725,12 +727,14 @@ internal static class DialogueManagerUpdatePatch
                         var reactionClip = PlayWav(sequence.Reaction, "native reaction");
                         _delayedSpeechAudio = sequence.Speech;
                         _delayedSpeechPlayAt = Time.unscaledTime + reactionClip.length + 0.03f;
+                        ProtectAiSpeech(reactionClip.length + EstimateWavDurationSeconds(sequence.Speech) + 0.35f);
                     }
                     else
                     {
                         SetVoicePitch(1f);
                         _delayedSpeechAudio = sequence.Speech;
                         _delayedSpeechPlayAt = Time.unscaledTime + 0.15f;
+                        ProtectAiSpeech(EstimateWavDurationSeconds(sequence.Speech) + 0.35f);
                     }
                 }
                 catch (Exception exception)
@@ -5772,9 +5776,30 @@ internal static class DialogueManagerUpdatePatch
     private static AudioClip PlayWav(byte[] wav, string label, float padLeadInSeconds = 0f)
     {
         var clip = CreateAudioClipFromWav(wav, padLeadInSeconds);
+        ProtectAiSpeech(clip.length + 0.08f);
         AudioManager.PlayVoice(clip, false, true);
         Plugin.PluginLog.LogInfo($"Playing {label} ({wav.Length} bytes, {clip.length:0.00}s).");
         return clip;
+    }
+
+    internal static bool ShouldSuppressNativeVoice()
+        => Time.unscaledTime < _aiSpeechProtectUntil;
+
+    private static void ProtectAiSpeech(float seconds)
+    {
+        _aiSpeechProtectUntil = Math.Max(_aiSpeechProtectUntil, Time.unscaledTime + Math.Max(0.05f, seconds));
+    }
+
+    private static float EstimateWavDurationSeconds(byte[] wav)
+    {
+        try
+        {
+            return CreateAudioClipFromWav(wav).length;
+        }
+        catch
+        {
+            return 8f;
+        }
     }
 
     private sealed class PendingAiReply
@@ -6764,6 +6789,8 @@ internal static class DialogueManagerUpdatePatch
 
     internal static bool TryPlayInjectedNativeVoice(DialogueNode node)
     {
+        if (ShouldSuppressNativeVoice())
+            return true;
         if (!Plugin.NativeVoicePackEnabled.Value || node == null)
             return false;
         if (node.id == _lastInjectedNativeNodeId && Time.unscaledTime - _lastInjectedNativeVoiceAt < 1f)
@@ -7481,6 +7508,51 @@ internal static class VoiceSettingsButtonClickPatch
     }
 }
 
+[HarmonyPatch(typeof(AudioManager))]
+internal static class AudioManagerAiSpeechGuardPatch
+{
+    [HarmonyPrefix]
+    [HarmonyPatch(nameof(AudioManager.PlayVoice), typeof(AudioClip), typeof(bool), typeof(bool))]
+    private static bool PlayClip(AudioClip clip)
+    {
+        if (clip != null && string.Equals(clip.name, "LilithAiVoice", StringComparison.Ordinal))
+            return true;
+        if (!DialogueManagerUpdatePatch.ShouldSuppressNativeVoice())
+            return true;
+        Plugin.PluginLog.LogInfo("Suppressed native/idle voice while AI speech is playing.");
+        return false;
+    }
+
+    [HarmonyPrefix]
+    [HarmonyPatch(nameof(AudioManager.PlayVoice), typeof(string), typeof(bool))]
+    private static bool PlaySoundId()
+    {
+        if (!DialogueManagerUpdatePatch.ShouldSuppressNativeVoice())
+            return true;
+        Plugin.PluginLog.LogInfo("Suppressed native/idle voice id while AI speech is playing.");
+        return false;
+    }
+
+    [HarmonyPrefix]
+    [HarmonyPatch(nameof(AudioManager.PlayVoiceBySoundId), typeof(string), typeof(bool))]
+    private static bool PlayBySoundId()
+        => PlaySoundId();
+
+    [HarmonyPrefix]
+    [HarmonyPatch(nameof(AudioManager.PlayVoiceBySoundId), typeof(string), typeof(LilithActionType), typeof(bool), typeof(LilithActionType))]
+    private static bool PlayByActionVoice()
+        => PlaySoundId();
+
+    [HarmonyPrefix]
+    [HarmonyPatch(nameof(AudioManager.StopVoice))]
+    private static bool StopVoice()
+    {
+        if (!DialogueManagerUpdatePatch.ShouldSuppressNativeVoice())
+            return true;
+        return false;
+    }
+}
+
 [HarmonyPatch(typeof(DialogueManager), "PlayNodeVoice")]
 internal static class DialogueManagerPlayNodeVoicePatch
 {
@@ -7488,6 +7560,8 @@ internal static class DialogueManagerPlayNodeVoicePatch
     {
         try
         {
+            if (DialogueManagerUpdatePatch.ShouldSuppressNativeVoice())
+                return false;
             DialogueManagerUpdatePatch.RecordUnvoicedNativeNode(node);
             return !DialogueManagerUpdatePatch.TryPlayInjectedNativeVoice(node);
         }
