@@ -437,25 +437,40 @@ internal sealed class InstallerForm : Form
         await RunProcessAsync(uv, $"pip install --python \"{python}\" torch==2.6.0 torchaudio==2.6.0 --index-url {torchIndex}", runtime);
         SetStatus(L("正在安裝語音辨識與合成相依元件…", "正在安装语音识别与合成依赖组件…", "音声合成の依存コンポーネントをインストール中…", "Installing voice synthesis dependencies…"));
         await RunProcessAsync(uv, $"pip install --python \"{python}\" -r \"{requirements}\"", runtime);
+        SetStatus(L("正在下載英文語音所需的 NLTK 資料…", "正在下载英文语音所需的 NLTK 数据…", "英語音声に必要なNLTKデータを取得中…", "Downloading NLTK data required for English speech…"));
+        var nltkData = Path.Combine(pythonDirectory, "nltk_data");
+        Directory.CreateDirectory(nltkData);
+        await RunProcessAsync(
+            python,
+            "-c \"import os,nltk; dest=os.environ['NLTK_DATA']; os.makedirs(dest, exist_ok=True); [nltk.download(p, download_dir=dest) for p in ['averaged_perceptron_tagger_eng','averaged_perceptron_tagger','punkt','punkt_tab','cmudict']]\"",
+            runtime,
+            new Dictionary<string, string> { ["NLTK_DATA"] = nltkData });
         File.WriteAllText(ready, DateTimeOffset.Now.ToString("O"));
     }
 
-    private static async Task RunProcessAsync(string file, string arguments, string workingDirectory)
+    private static async Task RunProcessAsync(
+        string file,
+        string arguments,
+        string workingDirectory,
+        IReadOnlyDictionary<string, string>? extraEnvironment = null)
     {
         var log = Path.Combine(workingDirectory, "voice-runtime-install.log");
-        using var process = new Process
+        var startInfo = new ProcessStartInfo
         {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = file,
-                Arguments = arguments,
-                WorkingDirectory = workingDirectory,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            }
+            FileName = file,
+            Arguments = arguments,
+            WorkingDirectory = workingDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
         };
+        if (extraEnvironment != null)
+        {
+            foreach (var pair in extraEnvironment)
+                startInfo.Environment[pair.Key] = pair.Value;
+        }
+        using var process = new Process { StartInfo = startInfo };
         process.Start();
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
@@ -612,6 +627,9 @@ internal static class VoiceHost
                 };
                 startInfo.Environment["PYTHONUTF8"] = "1";
                 startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+                var nltkData = Path.Combine(root, "python", "nltk_data");
+                if (Directory.Exists(nltkData))
+                    startInfo.Environment["NLTK_DATA"] = nltkData;
                 var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start the voice service.");
                 process.OutputDataReceived += async (_, e) => { if (e.Data != null) await LogAsync(log, $"[{service.Name}] {e.Data}"); };
                 process.ErrorDataReceived += async (_, e) => { if (e.Data != null) await LogAsync(log, $"[{service.Name}:err] {e.Data}"); };

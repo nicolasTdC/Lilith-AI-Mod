@@ -52,6 +52,9 @@ internal static class Program
                 };
                 startInfo.Environment["PYTHONUTF8"] = "1";
                 startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+                var nltkData = Path.Combine(root, "python", "nltk_data");
+                if (Directory.Exists(nltkData))
+                    startInfo.Environment["NLTK_DATA"] = nltkData;
                 var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start the voice service.");
                 process.OutputDataReceived += async (_, e) => { if (e.Data != null) await LogAsync(log, $"[{service.Name}] {e.Data}"); };
                 process.ErrorDataReceived += async (_, e) => { if (e.Data != null) await LogAsync(log, $"[{service.Name}:err] {e.Data}"); };

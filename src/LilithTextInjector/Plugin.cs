@@ -2117,6 +2117,9 @@ internal static class DialogueManagerUpdatePatch
         // stdout defaults to charmap/cp1252 and raises UnicodeEncodeError.
         startInfo.Environment["PYTHONUTF8"] = "1";
         startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+        var nltkData = Path.Combine(Paths.BepInExRootPath, "data", "LilithTextInjector", "voice-runtime", "python", "nltk_data");
+        if (Directory.Exists(nltkData))
+            startInfo.Environment["NLTK_DATA"] = nltkData;
     }
 
     private static void StopLocalVoiceHost()
