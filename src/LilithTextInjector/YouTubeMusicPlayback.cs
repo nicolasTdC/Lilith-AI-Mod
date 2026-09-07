@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
-using System.Threading.Tasks;
+using System.Text.RegularExpressions;
 
 namespace LilithTextInjector;
 
@@ -12,6 +14,7 @@ internal static class YouTubeMusicPlayback
 {
     private const string SearchEndpoint = "https://music.youtube.com/youtubei/v1/search?prettyPrint=false";
     private const string SongsFilter = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
+    private const string VideosFilter = "EgWKAQIQAWoKEAkQBRAKEAMQBA%3D%3D";
     private const string PlaylistsFilter = "EgWKAQIoAWoKEAkQBRAKEAMQBA%3D%3D";
     private static readonly HttpClient Http = new()
     {
@@ -19,6 +22,7 @@ internal static class YouTubeMusicPlayback
     };
 
     internal readonly record struct PlayResult(bool Success, string Url, string Title);
+    internal readonly record struct SearchHit(string VideoId, string Title);
 
     internal static PlayResult Play(string intent, string query)
     {
@@ -47,10 +51,10 @@ internal static class YouTubeMusicPlayback
     {
         if (query.Length < 1)
             return new PlayResult(false, string.Empty, "missing query");
-        var videoId = FindFirstVideoId(Search(query, SongsFilter));
-        if (string.IsNullOrWhiteSpace(videoId))
+        var hit = FindBestVideo(query);
+        if (hit == null)
             return Open("https://music.youtube.com/search?q=" + Uri.EscapeDataString(query), query);
-        return Open("https://music.youtube.com/watch?v=" + videoId, query);
+        return Open("https://music.youtube.com/watch?v=" + hit.Value.VideoId, hit.Value.Title);
     }
 
     private static PlayResult PlayPlaylist(string query)
@@ -67,10 +71,26 @@ internal static class YouTubeMusicPlayback
     {
         if (query.Length < 1)
             return new PlayResult(false, string.Empty, "missing query");
-        var videoId = FindFirstVideoId(Search(query, SongsFilter));
-        if (string.IsNullOrWhiteSpace(videoId))
+        var hit = FindBestVideo(query);
+        if (hit == null)
             return Open("https://music.youtube.com/search?q=" + Uri.EscapeDataString(query), query);
-        return Open($"https://music.youtube.com/watch?v={videoId}&list=RDAMVM{videoId}", query);
+        return Open($"https://music.youtube.com/watch?v={hit.Value.VideoId}&list=RDAMVM{hit.Value.VideoId}", hit.Value.Title);
+    }
+
+    private static SearchHit? FindBestVideo(string query)
+    {
+        var hits = new List<SearchHit>();
+        foreach (var filter in new[] { SongsFilter, VideosFilter, null })
+        {
+            try
+            {
+                CollectHits(Search(query, filter), hits);
+            }
+            catch
+            {
+            }
+        }
+        return PickBestHit(query, hits);
     }
 
     private static PlayResult Open(string url, string title)
@@ -117,9 +137,61 @@ internal static class YouTubeMusicPlayback
 
     internal static string? FindFirstVideoId(JsonElement root)
     {
-        var videos = new List<string>();
-        CollectIds(root, videos, playlists: null);
-        return videos.Count > 0 ? videos[0] : null;
+        var hits = new List<SearchHit>();
+        CollectHits(root, hits);
+        return hits.Count > 0 ? hits[0].VideoId : null;
+    }
+
+    internal static SearchHit? PickBestHit(string query, IReadOnlyList<SearchHit> hits)
+    {
+        SearchHit? best = null;
+        var bestScore = 0;
+        foreach (var hit in hits)
+        {
+            if (string.IsNullOrWhiteSpace(hit.VideoId))
+                continue;
+            var score = ScoreTitle(query, hit.Title);
+            if (score <= bestScore)
+                continue;
+            bestScore = score;
+            best = hit;
+        }
+        return bestScore >= 200 ? best : hits.Count > 0 ? hits[0] : null;
+    }
+
+    internal static int ScoreTitle(string query, string title)
+    {
+        var q = NormalizeMusicText(query);
+        var t = NormalizeMusicText(title);
+        if (q.Length == 0 || t.Length == 0)
+            return 0;
+        if (t.Contains(q, StringComparison.Ordinal) || q.Contains(t, StringComparison.Ordinal))
+            return 1000;
+        var tokens = q.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(token => token.Length >= 2 && token is not "ft" and not "feat" and not "the")
+            .ToArray();
+        if (tokens.Length == 0)
+            return 0;
+        var hits = tokens.Count(token => t.Contains(token, StringComparison.Ordinal));
+        var score = hits * 100;
+        if (hits == tokens.Length)
+            score += 250;
+        if (t.Contains("karaoke", StringComparison.Ordinal) && !q.Contains("karaoke", StringComparison.Ordinal))
+            score -= 80;
+        return score;
+    }
+
+    internal static string NormalizeMusicText(string value)
+    {
+        var decomposed = value.Normalize(NormalizationForm.FormD);
+        var builder = new StringBuilder(decomposed.Length);
+        foreach (var ch in decomposed)
+        {
+            if (CharUnicodeInfo.GetUnicodeCategory(ch) == UnicodeCategory.NonSpacingMark)
+                continue;
+            builder.Append(char.IsLetterOrDigit(ch) ? char.ToLowerInvariant(ch) : ' ');
+        }
+        return Regex.Replace(builder.ToString(), @"\s+", " ").Trim();
     }
 
     internal static string? FindFirstPlaylistId(JsonElement root)
@@ -137,6 +209,103 @@ internal static class YouTubeMusicPlayback
                 return id;
         }
         return playlists.Count > 0 ? playlists[0] : null;
+    }
+
+    private static void CollectHits(JsonElement element, List<SearchHit> hits)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                if (element.TryGetProperty("musicResponsiveListItemRenderer", out var item))
+                {
+                    var videoId = FindVideoId(item);
+                    var title = FindItemTitle(item);
+                    if (!string.IsNullOrWhiteSpace(videoId)
+                        && hits.TrueForAll(hit => !string.Equals(hit.VideoId, videoId, StringComparison.Ordinal)))
+                    {
+                        hits.Add(new SearchHit(videoId, title));
+                    }
+                }
+                foreach (var property in element.EnumerateObject())
+                    CollectHits(property.Value, hits);
+                break;
+            case JsonValueKind.Array:
+                foreach (var child in element.EnumerateArray())
+                    CollectHits(child, hits);
+                break;
+        }
+    }
+
+    private static string? FindVideoId(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (element.TryGetProperty("videoId", out var video)
+                && video.ValueKind == JsonValueKind.String)
+            {
+                var id = video.GetString();
+                if (id is { Length: 11 })
+                    return id;
+            }
+            foreach (var property in element.EnumerateObject())
+            {
+                var nested = FindVideoId(property.Value);
+                if (!string.IsNullOrWhiteSpace(nested))
+                    return nested;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+            {
+                var nested = FindVideoId(child);
+                if (!string.IsNullOrWhiteSpace(nested))
+                    return nested;
+            }
+        }
+        return null;
+    }
+
+    private static string FindItemTitle(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object
+            && element.TryGetProperty("runs", out var runs)
+            && runs.ValueKind == JsonValueKind.Array)
+        {
+            var builder = new StringBuilder();
+            foreach (var run in runs.EnumerateArray())
+            {
+                if (run.ValueKind == JsonValueKind.Object
+                    && run.TryGetProperty("text", out var text)
+                    && text.ValueKind == JsonValueKind.String)
+                    builder.Append(text.GetString());
+            }
+            var title = builder.ToString().Trim();
+            if (title.Length > 0
+                && !string.Equals(title, "Criar mix", StringComparison.OrdinalIgnoreCase)
+                && !title.StartsWith("Tocar", StringComparison.OrdinalIgnoreCase)
+                && !title.StartsWith("Play", StringComparison.OrdinalIgnoreCase))
+                return title;
+        }
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                var nested = FindItemTitle(property.Value);
+                if (nested.Length > 0)
+                    return nested;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+            {
+                var nested = FindItemTitle(child);
+                if (nested.Length > 0)
+                    return nested;
+            }
+        }
+        return string.Empty;
     }
 
     private static void CollectIds(JsonElement element, List<string>? videos, List<string>? playlists)
