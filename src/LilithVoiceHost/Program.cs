@@ -39,7 +39,7 @@ internal static class Program
                 if (await PortOpenAsync(service.Port, 300)) continue;
                 var config = Path.Combine(root, "config", $"{service.Name}-{device}.yaml");
                 if (!File.Exists(config)) throw new FileNotFoundException("Voice configuration is missing.", config);
-                var process = Process.Start(new ProcessStartInfo
+                var startInfo = new ProcessStartInfo
                 {
                     FileName = python,
                     Arguments = $"\"{api}\" -a 127.0.0.1 -p {service.Port} -c \"{config}\"",
@@ -49,7 +49,10 @@ internal static class Program
                     WindowStyle = ProcessWindowStyle.Hidden,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true
-                }) ?? throw new InvalidOperationException("Could not start the voice service.");
+                };
+                startInfo.Environment["PYTHONUTF8"] = "1";
+                startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+                var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start the voice service.");
                 process.OutputDataReceived += async (_, e) => { if (e.Data != null) await LogAsync(log, $"[{service.Name}] {e.Data}"); };
                 process.ErrorDataReceived += async (_, e) => { if (e.Data != null) await LogAsync(log, $"[{service.Name}:err] {e.Data}"); };
                 process.BeginOutputReadLine();

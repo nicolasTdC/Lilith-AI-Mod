@@ -2096,6 +2096,7 @@ internal static class DialogueManagerUpdatePatch
                 CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden
             };
+            ApplyUtf8PythonEnvironment(startInfo);
             var bundledDotnet = Path.Combine(Paths.GameRootPath, "dotnet");
             if (Directory.Exists(bundledDotnet))
                 startInfo.Environment["DOTNET_ROOT"] = bundledDotnet;
@@ -2108,6 +2109,14 @@ internal static class DialogueManagerUpdatePatch
             _voiceHostLaunchAttempted = false;
             Plugin.PluginLog.LogWarning($"Could not start the bundled local voice host: {exception.Message}");
         }
+    }
+
+    private static void ApplyUtf8PythonEnvironment(ProcessStartInfo startInfo)
+    {
+        // GPT-SoVITS prints Chinese/Japanese prompt text. Redirected Windows
+        // stdout defaults to charmap/cp1252 and raises UnicodeEncodeError.
+        startInfo.Environment["PYTHONUTF8"] = "1";
+        startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
     }
 
     private static void StopLocalVoiceHost()
