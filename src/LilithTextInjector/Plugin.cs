@@ -1768,7 +1768,7 @@ internal static class DialogueManagerUpdatePatch
         var games = new[]
         {
             new OfficialGame("Dota 2", "steam://rungameid/570", new[] { "Dota 2", "Dota2", "刀塔2", "刀塔 2", "ドータ2", "ドータ 2" }),
-            new OfficialGame("League of Legends", null, new[] { "League of Legends", "英雄聯盟", "英雄联盟", "LOL", "LoL", "擼啊擼", "撸啊撸", "リーグ・オブ・レジェンド" }, new[] { "League of Legends", "英雄聯盟", "英雄联盟", "Riot Client", "Riot用戶端" }),
+            new OfficialGame("League of Legends", "riotclient://launch-product=league_of_legends&launch-patchline=live", new[] { "League of Legends", "英雄聯盟", "英雄联盟", "LOL", "LoL", "擼啊擼", "撸啊撸", "リーグ・オブ・レジェンド" }, new[] { "League of Legends", "英雄聯盟", "英雄联盟", "Riot Client", "Riot用戶端" }),
             new OfficialGame("VALORANT", "riotclient://launch-product=valorant&launch-patchline=live", new[] { "VALORANT", "瓦羅蘭特", "瓦罗兰特", "特戰英豪", "特战英豪", "無畏契約", "无畏契约", "ヴァロラント" }, new[] { "VALORANT", "瓦羅蘭特", "瓦罗兰特", "特戰英豪", "特战英豪", "無畏契約", "无畏契约" }),
             new OfficialGame("Counter-Strike 2", "steam://rungameid/730", new[] { "Counter-Strike 2", "Counter Strike 2", "CS2", "CS 2", "絕對武力2", "绝对武力2", "反恐精英2", "カウンターストライク2" }),
             new OfficialGame("Overwatch 2", null, new[] { "Overwatch", "Overwatch 2", "鬥陣特攻", "斗阵特攻", "守望先鋒", "守望先锋", "オーバーウォッチ" }, new[] { "Overwatch", "Overwatch 2", "鬥陣特攻", "斗阵特攻", "守望先鋒", "守望先锋", "Battle.net" }),
@@ -1789,10 +1789,47 @@ internal static class DialogueManagerUpdatePatch
             var shortcut = game.ShortcutNames.Length == 0 ? null : ResolveWindowsShortcut(game.ShortcutNames);
             if (!string.IsNullOrWhiteSpace(shortcut))
                 return new ApplicationLauncher { Name = game.Name, Target = shortcut };
+            if (string.Equals(game.Name, "League of Legends", StringComparison.OrdinalIgnoreCase)
+                && ResolveLeagueOfLegendsLauncher() is { } league)
+                return league;
             if (!string.IsNullOrWhiteSpace(game.FallbackTarget))
                 return new ApplicationLauncher { Name = game.Name, Target = game.FallbackTarget };
             Plugin.PluginLog.LogWarning($"Official game '{game.Name}' was requested but its launcher shortcut was not found.");
-            return new ApplicationLauncher { Name = game.Name, Target = game.Name };
+            return null;
+        }
+        return null;
+    }
+
+    private static ApplicationLauncher? ResolveLeagueOfLegendsLauncher()
+    {
+        var riotServices = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Riot Games", "Riot Client", "RiotClientServices.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Riot Games", "Riot Client", "RiotClientServices.exe"),
+            @"C:\Riot Games\Riot Client\RiotClientServices.exe"
+        };
+        foreach (var path in riotServices)
+        {
+            if (!File.Exists(path))
+                continue;
+            return new ApplicationLauncher
+            {
+                Name = "League of Legends",
+                Target = path,
+                Arguments = "--launch-product=league_of_legends --launch-patchline=live"
+            };
+        }
+
+        var clients = new[]
+        {
+            @"C:\Riot Games\League of Legends\LeagueClient.exe",
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Riot Games", "League of Legends", "LeagueClient.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Riot Games", "League of Legends", "LeagueClient.exe")
+        };
+        foreach (var path in clients)
+        {
+            if (File.Exists(path))
+                return new ApplicationLauncher { Name = "League of Legends", Target = path };
         }
         return null;
     }
@@ -1800,28 +1837,21 @@ internal static class DialogueManagerUpdatePatch
     private static string? ResolveWindowsShortcut(string[] names)
     {
         if (!OperatingSystem.IsWindows()) return null;
-        try
+        foreach (var root in GetWindowsShortcutRoots())
         {
-            var roots = new[]
+            try
             {
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu),
-                Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory),
-                Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-            };
-            foreach (var root in roots.Where(Directory.Exists))
-            {
-                foreach (var shortcut in Directory.EnumerateFiles(root, "*.lnk", SearchOption.AllDirectories))
+                foreach (var shortcut in EnumerateAccessibleFiles(root, "*.lnk"))
                 {
                     var fileName = Path.GetFileNameWithoutExtension(shortcut);
                     if (names.Any(name => fileName.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0))
                         return shortcut;
                 }
             }
-        }
-        catch (Exception exception)
-        {
-            Plugin.PluginLog.LogWarning($"Could not search Windows shortcuts: {exception.Message}");
+            catch (Exception exception)
+            {
+                Plugin.PluginLog.LogWarning($"Could not search Windows shortcuts under '{root}': {exception.Message}");
+            }
         }
         return null;
     }
@@ -1846,7 +1876,7 @@ internal static class DialogueManagerUpdatePatch
             {
                 foreach (var pattern in new[] { "*.lnk", "*.url", "*.appref-ms" })
                 {
-                    foreach (var shortcut in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories))
+                    foreach (var shortcut in EnumerateAccessibleFiles(root, pattern))
                     {
                         var displayName = Path.GetFileNameWithoutExtension(shortcut);
                         if (Regex.IsMatch(displayName, "(uninstall|解除安裝|卸载|readme|help|manual|website|web site)", RegexOptions.IgnoreCase))
@@ -1990,6 +2020,72 @@ internal static class DialogueManagerUpdatePatch
 
     private static string NormalizeApplicationName(string value)
         => Regex.Replace(value.ToLowerInvariant(), @"[^\p{L}\p{N}]+", string.Empty);
+
+    private static IEnumerable<string> GetWindowsShortcutRoots()
+    {
+        foreach (var root in new[]
+                 {
+                     Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu),
+                     Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),
+                     Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory),
+                     Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                 })
+        {
+            if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))
+                yield return root;
+        }
+    }
+
+    private static IEnumerable<string> EnumerateAccessibleFiles(string root, string pattern)
+    {
+        var pending = new Stack<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        pending.Push(root);
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop();
+            if (!seen.Add(directory))
+                continue;
+
+            string[] files;
+            try
+            {
+                files = Directory.GetFiles(directory, pattern);
+            }
+            catch (Exception exception) when (exception is UnauthorizedAccessException or DirectoryNotFoundException or IOException)
+            {
+                Plugin.PluginLog.LogWarning($"Skipped inaccessible shortcut folder '{directory}': {exception.Message}");
+                continue;
+            }
+            foreach (var file in files)
+                yield return file;
+
+            string[] children;
+            try
+            {
+                children = Directory.GetDirectories(directory);
+            }
+            catch (Exception exception) when (exception is UnauthorizedAccessException or DirectoryNotFoundException or IOException)
+            {
+                Plugin.PluginLog.LogWarning($"Skipped inaccessible shortcut folder '{directory}': {exception.Message}");
+                continue;
+            }
+
+            foreach (var child in children)
+            {
+                try
+                {
+                    if ((File.GetAttributes(child) & FileAttributes.ReparsePoint) != 0)
+                        continue;
+                }
+                catch
+                {
+                    continue;
+                }
+                pending.Push(child);
+            }
+        }
+    }
 
     private static bool TryFocusRunningApplication(string requestedName)
     {
