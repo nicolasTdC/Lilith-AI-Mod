@@ -927,6 +927,15 @@ internal static class DialogueManagerUpdatePatch
             QueueAiReplyWithVoice(computerReply, computerReply, poseStyle: CapturePoseContext().VoiceStyle);
             return;
         }
+        if ((!useModelComputerTools || preferLocalComputerRouter) && TryHandleYouTubeMusicCommand(submitted, out var youtubeMusicReply))
+        {
+            _requestInFlight = true;
+            AddMemoryTurn("user", submitted);
+            AddMemoryTurn("model", youtubeMusicReply);
+            PendingAiEmotions.Enqueue("emoji_smile_1");
+            QueueAiReplyWithVoice(youtubeMusicReply, youtubeMusicReply, poseStyle: CapturePoseContext().VoiceStyle);
+            return;
+        }
         if ((!useModelComputerTools || preferLocalComputerRouter) && TryHandleMediaCommand(submitted, out var mediaReply))
         {
             _requestInFlight = true;
@@ -1452,6 +1461,99 @@ internal static class DialogueManagerUpdatePatch
             "先に設定で「高度なPC操作」を有効にしてね。",
             "Enable “Advanced PC controls” in Settings before I perform that action.");
         return false;
+    }
+
+    private static bool TryHandleYouTubeMusicCommand(string text, out string reply)
+    {
+        reply = string.Empty;
+        if (!LooksLikeYouTubeMusicRequest(text))
+            return false;
+        if (!EnsureAdvancedComputerActions(out reply))
+            return true;
+        var intent = ParseYouTubeMusicIntent(text, out var query);
+        TryStartYouTubeMusic(intent, query, out reply);
+        return true;
+    }
+
+    private static bool LooksLikeYouTubeMusicRequest(string text)
+    {
+        if (Regex.IsMatch(text, "youtube\\s*music|yt\\s*music|youtubemusic|油管音樂|油管音乐", RegexOptions.IgnoreCase))
+            return true;
+        return Regex.IsMatch(text,
+            "(?:play|播放|播|聽|听)\\s+(?:my\\s+)?(?:liked\\s+(?:songs|music)|likes|library)|(?:liked\\s+(?:songs|music)|我喜歡的歌|我喜欢的歌)",
+            RegexOptions.IgnoreCase);
+    }
+
+    private static string ParseYouTubeMusicIntent(string text, out string query)
+    {
+        query = string.Empty;
+        if (Regex.IsMatch(text, "liked\\s+(?:songs|music)|\\blikes\\b|我喜歡的歌|我喜欢的歌|喜歡的音樂|喜欢的音乐", RegexOptions.IgnoreCase))
+            return "liked";
+        if (Regex.IsMatch(text, "\\blibrary\\b|音樂庫|音乐库", RegexOptions.IgnoreCase))
+            return "library";
+        if (Regex.IsMatch(text, "\\bradio\\b|電台|电台|ラジオ", RegexOptions.IgnoreCase))
+        {
+            query = ExtractYouTubeMusicQuery(text);
+            return "radio";
+        }
+        if (Regex.IsMatch(text, "playlist|播放清單|播放列表|プレイリスト", RegexOptions.IgnoreCase))
+        {
+            query = ExtractYouTubeMusicQuery(text);
+            return "playlist";
+        }
+        query = ExtractYouTubeMusicQuery(text);
+        return "song";
+    }
+
+    private static string ExtractYouTubeMusicQuery(string text)
+    {
+        var cleaned = Regex.Replace(text,
+            "youtube\\s*music|yt\\s*music|youtubemusic|油管音樂|油管音乐|on\\s+youtube|please|for\\s+me|幫我|帮我|請|请",
+            " ",
+            RegexOptions.IgnoreCase);
+        cleaned = Regex.Replace(cleaned,
+            "^(?:play|播放|播|聽|听|open|開啟|打开)\\s+",
+            string.Empty,
+            RegexOptions.IgnoreCase);
+        cleaned = Regex.Replace(cleaned,
+            "\\b(?:song|track|playlist|radio|電台|电台|播放清單|播放列表)\\b",
+            " ",
+            RegexOptions.IgnoreCase);
+        return Regex.Replace(cleaned, "\\s+", " ").Trim(' ', '-', ':', '：');
+    }
+
+    private static bool TryStartYouTubeMusic(string intent, string query, out string reply)
+    {
+        var result = YouTubeMusicPlayback.Play(intent, query);
+        if (!result.Success)
+        {
+            reply = ApiKeyText(
+                "YouTube Music 現在沒辦法播放。",
+                "YouTube Music 现在没办法播放。",
+                "YouTube Musicを再生できなかったよ。",
+                "I couldn't start YouTube Music playback.");
+            Plugin.PluginLog.LogWarning($"YouTube Music play failed ({intent}): {result.Title}");
+            return false;
+        }
+
+        Plugin.PluginLog.LogInfo($"Opened YouTube Music ({intent}, queryChars={query.Length}).");
+        reply = intent switch
+        {
+            "liked" => ApiKeyText("好，幫你打開喜歡的音樂。", "好，帮你打开喜欢的音乐。", "うん、高評価の音楽を開くね。", "Okay, opening your liked music."),
+            "library" => ApiKeyText("好，幫你打開 YouTube Music 音樂庫。", "好，帮你打开 YouTube Music 音乐库。", "うん、YouTube Musicのライブラリを開くね。", "Okay, opening your YouTube Music library."),
+            "playlist" => ApiKeyText($"好，幫你用 YouTube Music 播放清單「{result.Title}」。", $"好，帮你用 YouTube Music 播放列表“{result.Title}”。", $"うん、YouTube Musicで「{result.Title}」のプレイリストを開くね。", $"Okay, opening the YouTube Music playlist for {result.Title}."),
+            "radio" => ApiKeyText($"好，幫你開「{result.Title}」的電台。", $"好，帮你开“{result.Title}”的电台。", $"うん、「{result.Title}」のラジオを開くね。", $"Okay, starting radio for {result.Title}."),
+            _ => ApiKeyText($"好，幫你在 YouTube Music 播放「{result.Title}」。", $"好，帮你在 YouTube Music 播放“{result.Title}”。", $"うん、YouTube Musicで「{result.Title}」を再生するね。", $"Okay, playing {result.Title} on YouTube Music.")
+        };
+        return true;
+    }
+
+    private static GeminiToolResult ExecuteYouTubeMusicTool(GeminiFunctionCallData call, string intent, string query)
+    {
+        if (string.IsNullOrWhiteSpace(intent))
+            intent = "song";
+        var success = TryStartYouTubeMusic(intent, query, out var reply);
+        return ToolResult(call, success, reply);
     }
 
     private static bool TryHandleMediaCommand(string text, out string reply)
@@ -4408,7 +4510,7 @@ internal static class DialogueManagerUpdatePatch
                 && (string.Equals(activeProvider, "Gemini", StringComparison.Ordinal)
                     || string.Equals(activeProvider, "Qwen", StringComparison.Ordinal)))
             {
-                systemInstruction += "\nDesktop agent policy: You may use the declared local desktop tools whenever they help fulfill the user's intent. Prefer tools over asking the user to repeat an exact command, and you may call several independent tools in parallel to complete a routine. Never claim an action succeeded unless its function result says success. All tools operate locally. Never request or expose passwords, API keys, OTPs, clipboard contents, file contents, browsing history, screenshots, precise location, or personal data. Never infer sleep or lock merely because the user says they are tired; call those tools only when the user explicitly asks the computer to sleep or lock. Destructive file operations, closing apps, shutdown, restart, arbitrary typing, arbitrary shortcuts, shell commands, and privilege elevation are unavailable. If a tool is unavailable, explain naturally without pretending it ran.";
+                systemInstruction += "\nDesktop agent policy: You may use the declared local desktop tools whenever they help fulfill the user's intent. Prefer tools over asking the user to repeat an exact command, and you may call several independent tools in parallel to complete a routine. Never claim an action succeeded unless its function result says success. All tools operate locally. Never request or expose passwords, API keys, OTPs, clipboard contents, file contents, browsing history, screenshots, precise location, or personal data. Never infer sleep or lock merely because the user says they are tired; call those tools only when the user explicitly asks the computer to sleep or lock. For music, use youtube_music to play a song, playlist, radio, liked music, or the library in the user's signed-in YouTube Music browser session; do not ask for Google passwords. Destructive file operations, closing apps, shutdown, restart, arbitrary typing, arbitrary shortcuts, shell commands, and privilege elevation are unavailable. If a tool is unavailable, explain naturally without pretending it ran.";
             }
             if (string.Equals(activeProvider, "Qwen", StringComparison.Ordinal))
             {
@@ -4555,6 +4657,7 @@ internal static class DialogueManagerUpdatePatch
             new { name = "take_screenshot", description = "Capture all local monitors to the user's Pictures/Lilith Screenshots folder. The screenshot remains local and is never uploaded or returned to the model.", parameters = Parameters(new { }) },
             new { name = "copy_text", description = "Write user-specified non-sensitive text to the local clipboard. Never use for passwords, API keys, OTPs, tokens, private identifiers, or other credentials. Clipboard reading is unavailable.", parameters = Parameters(new { text = new { type = "STRING", description = "The exact non-sensitive text the user explicitly wants copied." } }, "text") },
             new { name = "browser_search", description = "Open the default browser with a Google search. Use when the user explicitly wants results opened in their browser; ordinary factual questions can use Google Search instead.", parameters = Parameters(new { query = new { type = "STRING", description = "Search query explicitly requested by the user." } }, "query") },
+            new { name = "youtube_music", description = "Play a song, playlist, radio station, liked music, or library on YouTube Music in the user's default browser. Uses the Google account already signed into that browser. Never ask for a password. Use this instead of browser_search for music playback.", parameters = Parameters(new { intent = new { type = "STRING", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "STRING", description = "Song, artist, or playlist name. Required for song, playlist, and radio. Ignored for liked and library." } }, "intent") },
             new { name = "get_system_status", description = "Read a non-personal local system status value.", parameters = Parameters(new { category = new { type = "STRING", description = "One of: battery, memory, storage, network." } }, "category") },
             new { name = "keyboard_shortcut", description = "Send one allowlisted reversible shortcut to the most recent non-Lilith foreground app. Arbitrary keys and typing are unavailable.", parameters = Parameters(new { action = new { type = "STRING", description = "One of: undo, redo, save, select_all, find, refresh, fullscreen, escape." } }, "action") },
             new { name = "set_timer", description = "Create a local timer that Lilith will announce. Use a duration from 0.1 to 1440 minutes.", parameters = Parameters(new { minutes = new { type = "NUMBER", description = "Timer duration in minutes." }, message = new { type = "STRING", description = "Short announcement when the timer ends; omit personal or sensitive information." } }, "minutes", "message") },
@@ -4613,6 +4716,7 @@ internal static class DialogueManagerUpdatePatch
             string reply;
             var handled = TryHandleScreenshotCommand(session.UserText, out reply)
                 || TryHandleComputerCommand(session.UserText, out reply)
+                || TryHandleYouTubeMusicCommand(session.UserText, out reply)
                 || TryHandleMediaCommand(session.UserText, out reply)
                 || TryLaunchApplicationCommand(session.UserText, out reply);
             if (handled)
@@ -4672,6 +4776,8 @@ internal static class DialogueManagerUpdatePatch
                     return ExecuteCopyTextTool(call, GetToolString(call.Args, "text", 4000));
                 case "browser_search":
                     return ExecuteBrowserSearchTool(call, GetToolString(call.Args, "query", 500));
+                case "youtube_music":
+                    return ExecuteYouTubeMusicTool(call, GetToolString(call.Args, "intent", 40), GetToolString(call.Args, "query", 200));
                 case "get_system_status":
                     return ExecuteSystemStatusTool(call, GetToolString(call.Args, "category", 40));
                 case "keyboard_shortcut":
@@ -5057,6 +5163,7 @@ internal static class DialogueManagerUpdatePatch
         tools.Add(new { type = "function", name = "take_screenshot", description = "Capture all local monitors to the user's Pictures/Lilith Screenshots folder. The screenshot remains local and is never uploaded or returned to the model.", parameters = Parameters(new { }) });
         tools.Add(new { type = "function", name = "copy_text", description = "Write user-specified non-sensitive text to the local clipboard. Never use for passwords, API keys, OTPs, tokens, private identifiers, or other credentials. Clipboard reading is unavailable.", parameters = Parameters(new { text = new { type = "string", description = "The exact non-sensitive text the user explicitly wants copied." } }, "text") });
         tools.Add(new { type = "function", name = "browser_search", description = "Open the default browser with a Google search only when the user asks to see results in their browser. Prefer the built-in web search tool for factual lookups.", parameters = Parameters(new { query = new { type = "string", description = "Search query explicitly requested by the user." } }, "query") });
+        tools.Add(new { type = "function", name = "youtube_music", description = "Play a song, playlist, radio station, liked music, or library on YouTube Music in the user's default browser. Uses the Google account already signed into that browser. Never ask for a password.", parameters = Parameters(new { intent = new { type = "string", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "string", description = "Song, artist, or playlist name. Required for song, playlist, and radio." } }, "intent") });
         tools.Add(new { type = "function", name = "get_system_status", description = "Read a non-personal local system status value.", parameters = Parameters(new { category = new { type = "string", description = "One of: battery, memory, storage, network." } }, "category") });
         tools.Add(new { type = "function", name = "keyboard_shortcut", description = "Send one allowlisted reversible shortcut to the most recent non-Lilith foreground app. Arbitrary keys and typing are unavailable.", parameters = Parameters(new { action = new { type = "string", description = "One of: undo, redo, save, select_all, find, refresh, fullscreen, escape." } }, "action") });
         tools.Add(new { type = "function", name = "set_timer", description = "Create a local timer that Lilith will announce. Use a duration from 0.1 to 1440 minutes.", parameters = Parameters(new { minutes = new { type = "number", description = "Timer duration in minutes." }, message = new { type = "string", description = "Short announcement when the timer ends; omit personal or sensitive information." } }, "minutes", "message") });
