@@ -701,7 +701,7 @@ internal static class DialogueManagerUpdatePatch
             {
                 var pitch = Math.Clamp(Plugin.ReactionFollowupPitch.Value, 0.8f, 1.2f);
                 SetVoicePitch(pitch);
-                var clip = PlayWav(_delayedSpeechAudio, "generated speech");
+                var clip = PlayWav(_delayedSpeechAudio, "generated speech", padLeadInSeconds: 0.12f);
                 _voicePitchResetAt = Time.unscaledTime + clip.length / Math.Max(0.01f, pitch) + 0.05f;
             }
             catch (Exception exception)
@@ -729,7 +729,8 @@ internal static class DialogueManagerUpdatePatch
                     else
                     {
                         SetVoicePitch(1f);
-                        PlayWav(sequence.Speech, "generated speech");
+                        _delayedSpeechAudio = sequence.Speech;
+                        _delayedSpeechPlayAt = Time.unscaledTime + 0.15f;
                     }
                 }
                 catch (Exception exception)
@@ -5668,6 +5669,12 @@ internal static class DialogueManagerUpdatePatch
                 return;
             }
 
+            if (languages.TextLang == AiVoiceLanguagePolicy.English
+                && speechText.Length > 0
+                && !char.IsPunctuation(speechText[0]))
+            {
+                speechText = "... " + speechText;
+            }
             var payload = new
             {
                 text = speechText,
@@ -5676,7 +5683,7 @@ internal static class DialogueManagerUpdatePatch
                 aux_ref_audio_paths = auxiliaryReferences,
                 prompt_lang = languages.PromptLang,
                 prompt_text = promptText,
-                text_split_method = "cut0",
+                text_split_method = languages.TextLang == AiVoiceLanguagePolicy.English ? "cut5" : "cut0",
                 batch_size = 1,
                 media_type = "wav",
                 streaming_mode = false,
@@ -5762,9 +5769,9 @@ internal static class DialogueManagerUpdatePatch
             manager.source_Voice.pitch = pitch;
     }
 
-    private static AudioClip PlayWav(byte[] wav, string label)
+    private static AudioClip PlayWav(byte[] wav, string label, float padLeadInSeconds = 0f)
     {
-        var clip = CreateAudioClipFromWav(wav);
+        var clip = CreateAudioClipFromWav(wav, padLeadInSeconds);
         AudioManager.PlayVoice(clip, false, true);
         Plugin.PluginLog.LogInfo($"Playing {label} ({wav.Length} bytes, {clip.length:0.00}s).");
         return clip;
@@ -5885,7 +5892,7 @@ internal static class DialogueManagerUpdatePatch
         }
     }
 
-    private static AudioClip CreateAudioClipFromWav(byte[] wav)
+    private static AudioClip CreateAudioClipFromWav(byte[] wav, float padLeadInSeconds = 0f)
     {
         if (wav.Length < 44 || Encoding.ASCII.GetString(wav, 0, 4) != "RIFF" || Encoding.ASCII.GetString(wav, 8, 4) != "WAVE")
             throw new InvalidDataException("TTS response is not a WAV file.");
@@ -5937,6 +5944,14 @@ internal static class DialogueManagerUpdatePatch
         else
         {
             throw new InvalidDataException($"Unsupported WAV format={format}, bits={bits}.");
+        }
+
+        if (padLeadInSeconds > 0f && sampleRate > 0 && channels > 0)
+        {
+            var padFrames = Math.Max(1, (int)Math.Round(sampleRate * padLeadInSeconds));
+            var padded = new float[samples.Length + padFrames * channels];
+            Array.Copy(samples, 0, padded, padFrames * channels, samples.Length);
+            samples = padded;
         }
 
         var frameCount = samples.Length / channels;
