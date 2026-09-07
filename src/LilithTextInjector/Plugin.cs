@@ -569,7 +569,7 @@ internal static class DialogueManagerUpdatePatch
         }
 
         var displayText = ApiKeyText(traditional, simplified, japanese, english);
-        var speechText = IsJapaneseVoiceMode() ? japanese : traditional;
+        var speechText = SpokenTextForVoice(traditional, simplified, japanese, english);
         PlayAiEmotion(emotion);
         manager.ForceSay(displayText, string.Empty, 8f);
         if (Plugin.CodexBridgeVoiceEnabled.Value && Plugin.VoiceEnabled.Value)
@@ -3659,6 +3659,38 @@ internal static class DialogueManagerUpdatePatch
         return ("自然的繁體中文", "不可整句切換成簡體中文、日文或英文。", "繁體中文氣泡");
     }
 
+    private static bool IsEnglishInterface()
+    {
+        try
+        {
+            var language = GameSetting.Language ?? string.Empty;
+            return language.StartsWith("en", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string SpokenTextForVoice(string traditionalChinese, string simplifiedChinese, string japanese, string english)
+    {
+        if (IsJapaneseVoiceMode())
+            return japanese;
+        if (IsEnglishInterface())
+            return english;
+        try
+        {
+            var language = GameSetting.Language ?? string.Empty;
+            if (language.StartsWith("zh-CN", StringComparison.OrdinalIgnoreCase)
+                || language.StartsWith("zh-Hans", StringComparison.OrdinalIgnoreCase))
+                return simplifiedChinese;
+        }
+        catch
+        {
+        }
+        return traditionalChinese;
+    }
+
     private static bool UsesTraditionalChineseInterface()
     {
         try
@@ -5166,6 +5198,8 @@ internal static class DialogueManagerUpdatePatch
             var speechText = PrepareTextForSpeech(text);
             if (speechText.Length == 0)
                 return;
+            var languages = AiVoiceLanguagePolicy.Resolve(useJapanese, IsEnglishInterface(), speechText);
+            useJapanese = languages.UseJapaneseService;
             var referencePath = useJapanese ? Plugin.JapaneseVoiceReferencePath.Value.Trim() : Plugin.VoiceReferencePath.Value.Trim();
             var promptText = useJapanese
                 ? "これは儀式でもあるの。君に私の存在を感じてもらうための儀式ね。"
@@ -5194,10 +5228,10 @@ internal static class DialogueManagerUpdatePatch
             var payload = new
             {
                 text = speechText,
-                text_lang = useJapanese ? "ja" : "zh",
+                text_lang = languages.TextLang,
                 ref_audio_path = referencePath,
                 aux_ref_audio_paths = auxiliaryReferences,
-                prompt_lang = useJapanese ? "ja" : "zh",
+                prompt_lang = languages.PromptLang,
                 prompt_text = promptText,
                 text_split_method = "cut0",
                 batch_size = 1,
@@ -5206,6 +5240,8 @@ internal static class DialogueManagerUpdatePatch
                 seed = 42
             };
             var endpoint = useJapanese ? Plugin.JapaneseVoiceEndpoint.Value.Trim() : Plugin.VoiceEndpoint.Value.Trim();
+            Plugin.PluginLog.LogInfo(
+                $"Using {languages.TextLang} TTS (prompt {languages.PromptLang}) on the {(useJapanese ? "Japanese" : "Chinese")} voice service.");
             var payloadJson = JsonSerializer.Serialize(payload);
             var localEndpoint = IsLocalVoiceEndpoint(endpoint);
             var maximumAttempts = localEndpoint && Plugin.VoiceAutoStartLocalService.Value ? 7 : 1;
