@@ -338,4 +338,41 @@ internal static class YouTubeMusicPlayback
                 break;
         }
     }
+
+    internal static bool UserAskedToPlayOrChangeMusic(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+        if (UserAskedToChangeMusic(text))
+            return true;
+        return Regex.IsMatch(
+            text,
+            @"\b(?:play|playing|put on|queue|toca(?:r|e)?|p[oõ]e|coloca(?:r)?|bota(?:r)?|quero\s+(?:ouvir|escutar)|播放|播一首|聽|听)\b"
+            + @"|\b(?:youtube\s*music|yt\s*music|youtubemusic)\b"
+            + @"|liked\s+(?:songs|music)|我喜歡的歌|我喜欢的歌"
+            + @"|播放清單|播放列表|プレイリスト",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
+    internal static bool UserAskedToChangeMusic(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+        return Regex.IsMatch(
+            text,
+            @"\b(?:change|another|different|instead|next)\b.{0,24}\b(?:song|track|playlist|music|lo[- ]?fi)\b"
+            + @"|\b(?:troca(?:r)?|muda(?:r)?|outra|pr[oó]xima)\b.{0,16}\b(?:m[uú]sica|musica|playlist|faixa|lo[- ]?fi)\b"
+            + @"|\b(?:something else|another one|stop this|not this|para essa|n[aã]o essa|troca essa|toca outra)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
+    internal static bool LooksLikeGenericLofiQuery(string? query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+            return false;
+        return Regex.IsMatch(
+            query,
+            @"\b(?:lo[- ]?fi|chill(?:hop| beats)?|study beats|relax(?:ing)? beats)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
 }

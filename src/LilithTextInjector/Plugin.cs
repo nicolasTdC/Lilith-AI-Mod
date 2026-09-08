@@ -497,6 +497,8 @@ internal static class DialogueManagerUpdatePatch
     private static bool _xttsLaunchAttempted;
     private static bool _xttsMissingLogged;
     private static Process? _xttsProcess;
+    private static float _youtubeMusicStartedAt = -999f;
+    private static string _youtubeMusicLastQuery = string.Empty;
     private static IntPtr _apiKeyTrayPointer;
     private static bool _apiKeyDialogMode;
     private static volatile bool _apiKeyOpenRequested;
@@ -1559,7 +1561,9 @@ internal static class DialogueManagerUpdatePatch
             return false;
         }
 
-        Plugin.PluginLog.LogInfo($"Opened YouTube Music ({intent}, queryChars={query.Length}).");
+        _youtubeMusicStartedAt = Time.unscaledTime;
+        _youtubeMusicLastQuery = query ?? string.Empty;
+        Plugin.PluginLog.LogInfo($"Opened YouTube Music ({intent}, queryChars={_youtubeMusicLastQuery.Length}).");
         reply = intent switch
         {
             "liked" => ApiKeyText("好，幫你打開喜歡的音樂。", "好，帮你打开喜欢的音乐。", "うん、高評価の音楽を開くね。", "Okay, opening your liked music."),
@@ -1571,10 +1575,47 @@ internal static class DialogueManagerUpdatePatch
         return true;
     }
 
-    private static GeminiToolResult ExecuteYouTubeMusicTool(GeminiFunctionCallData call, string intent, string query)
+    private static GeminiToolResult ExecuteYouTubeMusicTool(
+        GeminiFunctionCallData call,
+        string intent,
+        string query,
+        string userText)
     {
         if (string.IsNullOrWhiteSpace(intent))
             intent = "song";
+        var asked = YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic(userText);
+        var changing = YouTubeMusicPlayback.UserAskedToChangeMusic(userText);
+        var recentlyStarted = Time.unscaledTime - _youtubeMusicStartedAt < 480f;
+        if (!asked)
+        {
+            Plugin.PluginLog.LogInfo("Skipped unsolicited YouTube Music tool call.");
+            return ToolResult(call, false, ApiKeyText(
+                "沒有開始新的音樂：對方沒有要求播放或更換。請不要再呼叫這個工具，也不要說你放了歌。",
+                "没有开始新的音乐：对方没有要求播放或更换。请不要再调用这个工具，也不要说你放了歌。",
+                "新しい音楽は始めていないよ。再生や曲変更のお願いがなかったから、このツールはもう呼ばないで、曲をかけたとも言わないでね。",
+                "Did not start music: the user did not ask to play or change a track. Do not call this tool again, and do not claim you started a playlist."));
+        }
+        if (recentlyStarted && !changing)
+        {
+            Plugin.PluginLog.LogInfo("Skipped YouTube Music because playback was started recently.");
+            return ToolResult(call, false, ApiKeyText(
+                "音樂已經在播了，所以沒有再開另一份播放清單。",
+                "音乐已经在播了，所以没有再开另一份播放列表。",
+                "もう音楽が流れているから、別のプレイリストは開かなかったよ。",
+                "Music is already playing, so I did not start another playlist."));
+        }
+        if (recentlyStarted
+            && YouTubeMusicPlayback.LooksLikeGenericLofiQuery(query)
+            && YouTubeMusicPlayback.LooksLikeGenericLofiQuery(_youtubeMusicLastQuery)
+            && !changing)
+        {
+            Plugin.PluginLog.LogInfo("Skipped a repeat lofi YouTube Music playlist.");
+            return ToolResult(call, false, ApiKeyText(
+                "剛剛已經放了 lofi，所以沒有再開另一份。",
+                "刚刚已经放了 lofi，所以没有再开另一份。",
+                "さっきすでにlofiをかけたから、別のは開かなかったよ。",
+                "Lofi is already playing, so I did not start another playlist."));
+        }
         var success = TryStartYouTubeMusic(intent, query, out var reply);
         return ToolResult(call, success, reply);
     }
@@ -4692,7 +4733,7 @@ internal static class DialogueManagerUpdatePatch
                 && (string.Equals(activeProvider, "Gemini", StringComparison.Ordinal)
                     || string.Equals(activeProvider, "Qwen", StringComparison.Ordinal)))
             {
-                systemInstruction += "\nDesktop agent policy: You may use the declared local desktop tools whenever they help fulfill the user's intent. Prefer tools over asking the user to repeat an exact command, and you may call several independent tools in parallel to complete a routine. Never claim an action succeeded unless its function result says success. All tools operate locally. Never request or expose passwords, API keys, OTPs, clipboard contents, file contents, browsing history, screenshots, precise location, or personal data. Never infer sleep or lock merely because the user says they are tired; call those tools only when the user explicitly asks the computer to sleep or lock. For music, use youtube_music to play a song, playlist, radio, liked music, or the library in the user's signed-in YouTube Music browser session; do not ask for Google passwords. Destructive file operations, closing apps, shutdown, restart, arbitrary typing, arbitrary shortcuts, shell commands, and privilege elevation are unavailable. If a tool is unavailable, explain naturally without pretending it ran.";
+                systemInstruction += "\nDesktop agent policy: You may use the declared local desktop tools whenever they help fulfill the user's intent. Prefer tools over asking the user to repeat an exact command, and you may call several independent tools in parallel to complete a routine. Never claim an action succeeded unless its function result says success. All tools operate locally. Never request or expose passwords, API keys, OTPs, clipboard contents, file contents, browsing history, screenshots, precise location, or personal data. Never infer sleep or lock merely because the user says they are tired; call those tools only when the user explicitly asks the computer to sleep or lock. For music, call youtube_music only when the user explicitly asks to play, change, or start a song, playlist, or radio. Never start music unsolicited, never default to lofi/chill playlists, and never start another playlist if music is already playing unless the user asked to change it. Do not ask for Google passwords. Destructive file operations, closing apps, shutdown, restart, arbitrary typing, arbitrary shortcuts, shell commands, and privilege elevation are unavailable. If a tool is unavailable, explain naturally without pretending it ran.";
             }
             if (string.Equals(activeProvider, "Qwen", StringComparison.Ordinal))
             {
@@ -4839,7 +4880,7 @@ internal static class DialogueManagerUpdatePatch
             new { name = "take_screenshot", description = "Capture all local monitors to the user's Pictures/Lilith Screenshots folder. The screenshot remains local and is never uploaded or returned to the model.", parameters = Parameters(new { }) },
             new { name = "copy_text", description = "Write user-specified non-sensitive text to the local clipboard. Never use for passwords, API keys, OTPs, tokens, private identifiers, or other credentials. Clipboard reading is unavailable.", parameters = Parameters(new { text = new { type = "STRING", description = "The exact non-sensitive text the user explicitly wants copied." } }, "text") },
             new { name = "browser_search", description = "Open the default browser with a Google search. Use when the user explicitly wants results opened in their browser; ordinary factual questions can use Google Search instead.", parameters = Parameters(new { query = new { type = "STRING", description = "Search query explicitly requested by the user." } }, "query") },
-            new { name = "youtube_music", description = "Play a song, playlist, radio station, liked music, or library on YouTube Music in the user's default browser. Uses the Google account already signed into that browser. Never ask for a password. Use this instead of browser_search for music playback.", parameters = Parameters(new { intent = new { type = "STRING", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "STRING", description = "Song, artist, or playlist name. Required for song, playlist, and radio. Ignored for liked and library." } }, "intent") },
+            new { name = "youtube_music", description = "Play a song, playlist, radio, liked music, or library on YouTube Music only when the user explicitly asks to play or change music. Never call this unsolicited, never default to lofi, and never start another playlist over music that is already playing. Uses the signed-in browser session. Never ask for a password.", parameters = Parameters(new { intent = new { type = "STRING", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "STRING", description = "Song, artist, or playlist name. Required for song, playlist, and radio. Ignored for liked and library." } }, "intent") },
             new { name = "get_system_status", description = "Read a non-personal local system status value.", parameters = Parameters(new { category = new { type = "STRING", description = "One of: battery, memory, storage, network." } }, "category") },
             new { name = "keyboard_shortcut", description = "Send one allowlisted reversible shortcut to the most recent non-Lilith foreground app. Arbitrary keys and typing are unavailable.", parameters = Parameters(new { action = new { type = "STRING", description = "One of: undo, redo, save, select_all, find, refresh, fullscreen, escape." } }, "action") },
             new { name = "set_timer", description = "Create a local timer that Lilith will announce. Use a duration from 0.1 to 1440 minutes.", parameters = Parameters(new { minutes = new { type = "NUMBER", description = "Timer duration in minutes." }, message = new { type = "STRING", description = "Short announcement when the timer ends; omit personal or sensitive information." } }, "minutes", "message") },
@@ -4863,7 +4904,7 @@ internal static class DialogueManagerUpdatePatch
         {
             var results = new List<GeminiToolResult>();
             foreach (var call in batch.Calls.Take(8))
-                results.Add(ExecuteGeminiComputerTool(call));
+                results.Add(ExecuteGeminiComputerTool(call, batch.Session.UserText));
             foreach (var call in batch.Calls.Skip(8))
                 results.Add(new GeminiToolResult { Name = call.Name, Id = call.Id, Success = false, Message = "Too many actions were requested in one turn." });
 
@@ -4934,7 +4975,7 @@ internal static class DialogueManagerUpdatePatch
         }
     }
 
-    private static GeminiToolResult ExecuteGeminiComputerTool(GeminiFunctionCallData call)
+    private static GeminiToolResult ExecuteGeminiComputerTool(GeminiFunctionCallData call, string userText = "")
     {
         if (!Plugin.AdvancedComputerActionsEnabled.Value)
             return ToolResult(call, false, ApiKeyText("進階電腦操作目前是關閉的。", "高级电脑操作目前已关闭。", "高度なPC操作は今オフになっているよ。", "Advanced PC controls are currently disabled."));
@@ -4959,7 +5000,11 @@ internal static class DialogueManagerUpdatePatch
                 case "browser_search":
                     return ExecuteBrowserSearchTool(call, GetToolString(call.Args, "query", 500));
                 case "youtube_music":
-                    return ExecuteYouTubeMusicTool(call, GetToolString(call.Args, "intent", 40), GetToolString(call.Args, "query", 200));
+                    return ExecuteYouTubeMusicTool(
+                        call,
+                        GetToolString(call.Args, "intent", 40),
+                        GetToolString(call.Args, "query", 200),
+                        userText);
                 case "get_system_status":
                     return ExecuteSystemStatusTool(call, GetToolString(call.Args, "category", 40));
                 case "keyboard_shortcut":
@@ -5345,7 +5390,7 @@ internal static class DialogueManagerUpdatePatch
         tools.Add(new { type = "function", name = "take_screenshot", description = "Capture all local monitors to the user's Pictures/Lilith Screenshots folder. The screenshot remains local and is never uploaded or returned to the model.", parameters = Parameters(new { }) });
         tools.Add(new { type = "function", name = "copy_text", description = "Write user-specified non-sensitive text to the local clipboard. Never use for passwords, API keys, OTPs, tokens, private identifiers, or other credentials. Clipboard reading is unavailable.", parameters = Parameters(new { text = new { type = "string", description = "The exact non-sensitive text the user explicitly wants copied." } }, "text") });
         tools.Add(new { type = "function", name = "browser_search", description = "Open the default browser with a Google search only when the user asks to see results in their browser. Prefer the built-in web search tool for factual lookups.", parameters = Parameters(new { query = new { type = "string", description = "Search query explicitly requested by the user." } }, "query") });
-        tools.Add(new { type = "function", name = "youtube_music", description = "Play a song, playlist, radio station, liked music, or library on YouTube Music in the user's default browser. Uses the Google account already signed into that browser. Never ask for a password.", parameters = Parameters(new { intent = new { type = "string", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "string", description = "Song, artist, or playlist name. Required for song, playlist, and radio." } }, "intent") });
+        tools.Add(new { type = "function", name = "youtube_music", description = "Play a song, playlist, radio, liked music, or library on YouTube Music only when the user explicitly asks to play or change music. Never call this unsolicited, never default to lofi, and never start another playlist over music that is already playing.", parameters = Parameters(new { intent = new { type = "string", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "string", description = "Song, artist, or playlist name. Required for song, playlist, and radio." } }, "intent") });
         tools.Add(new { type = "function", name = "get_system_status", description = "Read a non-personal local system status value.", parameters = Parameters(new { category = new { type = "string", description = "One of: battery, memory, storage, network." } }, "category") });
         tools.Add(new { type = "function", name = "keyboard_shortcut", description = "Send one allowlisted reversible shortcut to the most recent non-Lilith foreground app. Arbitrary keys and typing are unavailable.", parameters = Parameters(new { action = new { type = "string", description = "One of: undo, redo, save, select_all, find, refresh, fullscreen, escape." } }, "action") });
         tools.Add(new { type = "function", name = "set_timer", description = "Create a local timer that Lilith will announce. Use a duration from 0.1 to 1440 minutes.", parameters = Parameters(new { minutes = new { type = "number", description = "Timer duration in minutes." }, message = new { type = "string", description = "Short announcement when the timer ends; omit personal or sensitive information." } }, "minutes", "message") });
@@ -5364,7 +5409,7 @@ internal static class DialogueManagerUpdatePatch
         {
             foreach (var call in batch.Calls.Take(8))
             {
-                var result = ExecuteGeminiComputerTool(call);
+                var result = ExecuteGeminiComputerTool(call, batch.Session.UserText);
                 batch.Session.Input.Add(new
                 {
                     type = "function_call",

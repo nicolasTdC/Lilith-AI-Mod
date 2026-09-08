@@ -21,7 +21,14 @@ var picked = YouTubeMusicPlayback.PickBestHit(query, new[]
 });
 Assert(picked?.VideoId == "B3gAZvncfa0", "Video-catalog matches should be chosen over the wrong song result.");
 
-Console.WriteLine("YouTube Music ID parsing tests passed (6 assertions).");
+Assert(YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic("toca um lofi"), "Portuguese play requests should count as explicit.");
+Assert(YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic("play lo-fi playlist"), "English play requests should count as explicit.");
+Assert(!YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic("estou cansado hoje"), "Casual chat must not count as a music request.");
+Assert(!YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic("that playlist was nice"), "Mentioning a playlist must not start another one.");
+Assert(YouTubeMusicPlayback.UserAskedToChangeMusic("toca outra"), "Asking for another track should count as a change.");
+Assert(YouTubeMusicPlayback.LooksLikeGenericLofiQuery("lofi girl beats"), "Lofi queries should be recognized.");
+
+Console.WriteLine("YouTube Music ID parsing tests passed (12 assertions).");
 
 static void Assert(bool condition, string message)
 {
