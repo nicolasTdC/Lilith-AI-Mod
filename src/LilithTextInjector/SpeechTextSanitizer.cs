@@ -45,6 +45,9 @@ internal static class SpeechTextSanitizer
         @"\b(perfeit[ao]|maravilhos[ao]|incr[ií]vel)(?!mente)[a-zà-ÿ]*",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly Regex PunctOnly = new(@"^[\s,.!?;:~…。，、！？～·•\-—]+$", RegexOptions.Compiled);
+    private static readonly Regex ExtraPauses = new(@"([.,。，])(?:\s*[.,。，])+", RegexOptions.Compiled);
+    private static readonly Regex LeadingPause = new(@"^[.,\s]+", RegexOptions.Compiled);
+    private static readonly Regex TrailingPauseLines = new(@"\n[. ,]+$", RegexOptions.Compiled);
     private static readonly Regex NeverMatches = new(@"a^", RegexOptions.Compiled);
 
     private static readonly Dictionary<string, string> DefaultAbbreviations = new(StringComparer.OrdinalIgnoreCase)
@@ -194,20 +197,22 @@ internal static class SpeechTextSanitizer
         cleaned = Url.Replace(cleaned, string.Empty);
         cleaned = SourceLabel.Replace(cleaned, string.Empty);
         cleaned = StripEmojiRunes(cleaned);
-        cleaned = EmojiShortcode.Replace(cleaned, string.Empty);
-        cleaned = Emoticon.Replace(cleaned, string.Empty);
-        cleaned = Laughter.Replace(cleaned, string.Empty);
-        cleaned = Token.Replace(cleaned, match => IsKeyboardSmash(match.Value) ? string.Empty : match.Value);
+        cleaned = EmojiShortcode.Replace(cleaned, ". ");
+        cleaned = Emoticon.Replace(cleaned, ". ");
+        cleaned = Laughter.Replace(cleaned, ". ");
+        cleaned = Token.Replace(cleaned, match => IsKeyboardSmash(match.Value) ? ". " : match.Value);
         cleaned = RepeatedLetters.Replace(cleaned, "$1");
         cleaned = HypeWordTail.Replace(cleaned, "$1");
         cleaned = RepeatedExclaim.Replace(cleaned, ".");
         cleaned = RepeatedQuestion.Replace(cleaned, "?");
         cleaned = ExpandAbbreviations(cleaned);
         cleaned = SpaceAroundNewline.Replace(cleaned, "\n");
+        cleaned = ExtraPauses.Replace(cleaned, "$1");
         cleaned = Spaces.Replace(cleaned, " ");
         cleaned = ExtraNewlines.Replace(cleaned, "\n\n");
+        cleaned = TrailingPauseLines.Replace(cleaned, string.Empty);
         cleaned = SpaceBeforePunct.Replace(cleaned, "$1");
-        cleaned = cleaned.Trim();
+        cleaned = LeadingPause.Replace(cleaned, string.Empty).Trim();
         if (cleaned.Length == 0 || PunctOnly.IsMatch(cleaned))
             return string.Empty;
         return cleaned;
@@ -287,12 +292,34 @@ internal static class SpeechTextSanitizer
     private static string StripEmojiRunes(string text)
     {
         var builder = new StringBuilder(text.Length);
+        var pendingPause = false;
         foreach (var rune in text.EnumerateRunes())
         {
-            if (!IsEmojiRune(rune.Value))
-                builder.Append(rune);
+            if (IsEmojiRune(rune.Value))
+            {
+                pendingPause = true;
+                continue;
+            }
+            if (pendingPause)
+            {
+                AppendPause(builder);
+                pendingPause = false;
+            }
+            builder.Append(rune);
         }
+        if (pendingPause)
+            AppendPause(builder);
         return builder.ToString();
+    }
+
+    private static void AppendPause(StringBuilder builder)
+    {
+        if (builder.Length == 0)
+            return;
+        var last = builder[builder.Length - 1];
+        if (last is '.' or ',' or '?' or '!' or '。' or '，' or '？' or '！')
+            return;
+        builder.Append(". ");
     }
 
     private static bool IsEmojiRune(int value)
