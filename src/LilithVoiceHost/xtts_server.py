@@ -37,7 +37,9 @@ def collect_refs(path: str | None) -> list[str]:
     files = [
         str(item)
         for item in sorted(target.iterdir())
-        if item.is_file() and item.suffix.lower() in AUDIO_SUFFIXES
+        if item.is_file()
+        and item.suffix.lower() in AUDIO_SUFFIXES
+        and not item.name.endswith(".xtts-ready.wav")
     ]
     return files
 
@@ -82,6 +84,41 @@ def _load_audio_without_ffmpeg(audiopath, sampling_rate):
     return audio
 
 
+def _preprocess_mono(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    """Lift quiet/whispery WhatsApp notes so XTTS does not clone the muffling."""
+    from scipy.signal import butter, sosfilt
+
+    x = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if x.size == 0:
+        return x
+    sos = butter(4, 80 / (sample_rate / 2), btype="highpass", output="sos")
+    x = sosfilt(sos, x).astype(np.float32)
+    envelope = np.abs(x)
+    if envelope.size > sample_rate // 20:
+        win = max(1, sample_rate // 50)
+        kernel = np.ones(win, dtype=np.float32) / win
+        smooth = np.convolve(envelope, kernel, mode="same")
+        keep = np.where(smooth > 0.018)[0]
+        if keep.size > sample_rate:
+            pad = int(0.06 * sample_rate)
+            x = x[max(0, keep[0] - pad) : min(x.size, keep[-1] + pad)]
+    mag = np.abs(x) + 1e-8
+    threshold = 0.08
+    ratio = 3.5
+    over = mag > threshold
+    gain = np.ones_like(x)
+    gain[over] = (threshold + (mag[over] - threshold) / ratio) / mag[over]
+    x *= gain
+    rms = float(np.sqrt(np.mean(np.square(x))) + 1e-8)
+    x *= (10 ** (-16.0 / 20.0)) / rms
+    presence = butter(2, 2500 / (sample_rate / 2), btype="highpass", output="sos")
+    x = (x + 0.35 * sosfilt(presence, x)).astype(np.float32)
+    peak = float(np.max(np.abs(x)) + 1e-8)
+    if peak > 0.92:
+        x *= 0.92 / peak
+    return np.clip(x, -1.0, 1.0).astype(np.float32)
+
+
 def load_tts(device: str):
     import torch
     from TTS.api import TTS
@@ -111,15 +148,57 @@ def sample_rate_of(tts) -> int:
     return int(rate or 24000)
 
 
-def synthesize(tts, text: str, refs: list[str], language: str):
-    speaker = refs if len(refs) > 1 else refs[0]
-    wav = tts.tts(
+def clone_voice(tts, refs: list[str]):
+    import torch
+    import soundfile as sf
+    import TTS.tts.models.xtts as xtts_mod
+
+    model = tts.synthesizer.tts_model
+    prepared = []
+    for path in refs:
+        data, sr = sf.read(path, dtype="float32", always_2d=False)
+        if getattr(data, "ndim", 1) > 1:
+            data = np.mean(data, axis=1)
+        cleaned = _preprocess_mono(data, int(sr))
+        tmp = Path(path).with_name(Path(path).stem + ".xtts-ready.wav")
+        sf.write(tmp, cleaned, int(sr), subtype="PCM_16")
+        prepared.append(str(tmp))
+        rms = float(np.sqrt(np.mean(np.square(cleaned))) + 1e-12)
+        LOG.info(
+            "Prepared ref %s (%.2fs, rms=%.1f dBFS) -> %s",
+            path,
+            cleaned.size / float(sr),
+            20.0 * np.log10(rms),
+            tmp,
+        )
+    xtts_mod.load_audio = _load_audio_without_ffmpeg
+    with torch.inference_mode():
+        gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
+            audio_path=prepared,
+            gpt_cond_len=12,
+            gpt_cond_chunk_len=4,
+            max_ref_length=20,
+            sound_norm_refs=True,
+        )
+    return gpt_cond_latent, speaker_embedding
+
+
+def synthesize(tts, text: str, language: str, gpt_cond_latent, speaker_embedding):
+    model = tts.synthesizer.tts_model
+    result = model.inference(
         text=text,
-        speaker_wav=speaker,
         language=language,
-        split_sentences=True,
+        gpt_cond_latent=gpt_cond_latent,
+        speaker_embedding=speaker_embedding,
+        temperature=0.4,
+        length_penalty=1.0,
+        repetition_penalty=7.0,
+        top_k=50,
+        top_p=0.8,
+        speed=1.0,
+        enable_text_splitting=True,
     )
-    return wav
+    return result["wav"]
 
 
 def main() -> int:
@@ -142,6 +221,8 @@ def main() -> int:
 
     tts, device = load_tts(args.device)
     rate = sample_rate_of(tts)
+    cached_key = tuple(default_refs)
+    gpt_cond_latent, speaker_embedding = clone_voice(tts, default_refs)
     app = FastAPI()
 
     @app.get("/ready")
@@ -152,6 +233,7 @@ def main() -> int:
             "language": "pt",
             "refs": default_refs,
             "sample_rate": rate,
+            "temperature": 0.4,
         }
 
     @app.post("/tts")
@@ -179,7 +261,12 @@ def main() -> int:
             return Response(content=b"no speaker reference", status_code=400)
 
         try:
-            wav = synthesize(tts, text, refs, language)
+            nonlocal gpt_cond_latent, speaker_embedding, cached_key
+            key = tuple(refs)
+            if key != cached_key:
+                gpt_cond_latent, speaker_embedding = clone_voice(tts, refs)
+                cached_key = key
+            wav = synthesize(tts, text, language, gpt_cond_latent, speaker_embedding)
             return Response(content=encode_wav(wav, rate), media_type="audio/wav")
         except Exception as exception:
             LOG.exception("XTTS synthesis failed")
