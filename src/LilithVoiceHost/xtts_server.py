@@ -84,38 +84,30 @@ def _load_audio_without_ffmpeg(audiopath, sampling_rate):
     return audio
 
 
-def _preprocess_mono(audio: np.ndarray, sample_rate: int) -> np.ndarray:
-    """Lift quiet/whispery WhatsApp notes so XTTS does not clone the muffling."""
+def _preprocess_mono(audio: np.ndarray, sample_rate: int, max_seconds: float = 8.0) -> np.ndarray:
+    """Keep the first clear seconds and match loudness without adding rasp."""
     from scipy.signal import butter, sosfilt
 
     x = np.asarray(audio, dtype=np.float32).reshape(-1)
     if x.size == 0:
         return x
-    sos = butter(4, 80 / (sample_rate / 2), btype="highpass", output="sos")
+    x = x[: int(max_seconds * sample_rate)]
+    sos = butter(2, 70 / (sample_rate / 2), btype="highpass", output="sos")
     x = sosfilt(sos, x).astype(np.float32)
     envelope = np.abs(x)
     if envelope.size > sample_rate // 20:
         win = max(1, sample_rate // 50)
         kernel = np.ones(win, dtype=np.float32) / win
         smooth = np.convolve(envelope, kernel, mode="same")
-        keep = np.where(smooth > 0.018)[0]
-        if keep.size > sample_rate:
-            pad = int(0.06 * sample_rate)
+        keep = np.where(smooth > 0.02)[0]
+        if keep.size > sample_rate // 2:
+            pad = int(0.04 * sample_rate)
             x = x[max(0, keep[0] - pad) : min(x.size, keep[-1] + pad)]
-    mag = np.abs(x) + 1e-8
-    threshold = 0.08
-    ratio = 3.5
-    over = mag > threshold
-    gain = np.ones_like(x)
-    gain[over] = (threshold + (mag[over] - threshold) / ratio) / mag[over]
-    x *= gain
     rms = float(np.sqrt(np.mean(np.square(x))) + 1e-8)
-    x *= (10 ** (-16.0 / 20.0)) / rms
-    presence = butter(2, 2500 / (sample_rate / 2), btype="highpass", output="sos")
-    x = (x + 0.35 * sosfilt(presence, x)).astype(np.float32)
+    x *= (10 ** (-18.0 / 20.0)) / rms
     peak = float(np.max(np.abs(x)) + 1e-8)
-    if peak > 0.92:
-        x *= 0.92 / peak
+    if peak > 0.89:
+        x *= 0.89 / peak
     return np.clip(x, -1.0, 1.0).astype(np.float32)
 
 
@@ -175,9 +167,9 @@ def clone_voice(tts, refs: list[str]):
     with torch.inference_mode():
         gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
             audio_path=prepared,
-            gpt_cond_len=12,
+            gpt_cond_len=8,
             gpt_cond_chunk_len=4,
-            max_ref_length=20,
+            max_ref_length=8,
             sound_norm_refs=True,
         )
     return gpt_cond_latent, speaker_embedding
@@ -190,7 +182,7 @@ def synthesize(tts, text: str, language: str, gpt_cond_latent, speaker_embedding
         language=language,
         gpt_cond_latent=gpt_cond_latent,
         speaker_embedding=speaker_embedding,
-        temperature=0.4,
+        temperature=0.35,
         length_penalty=1.0,
         repetition_penalty=7.0,
         top_k=50,
@@ -233,7 +225,7 @@ def main() -> int:
             "language": "pt",
             "refs": default_refs,
             "sample_rate": rate,
-            "temperature": 0.4,
+            "temperature": 0.35,
         }
 
     @app.post("/tts")
