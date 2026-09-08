@@ -84,27 +84,29 @@ def _load_audio_without_ffmpeg(audiopath, sampling_rate):
     return audio
 
 
-def _preprocess_mono(audio: np.ndarray, sample_rate: int, max_seconds: float = 8.0) -> np.ndarray:
-    """Keep the first clear seconds and match loudness without adding rasp."""
+def _preprocess_mono(audio: np.ndarray, sample_rate: int, max_seconds: float = 10.0) -> np.ndarray:
+    """Keep a short voiced stretch, lift quiet/dark captures, avoid raspy EQ."""
     from scipy.signal import butter, sosfilt
 
     x = np.asarray(audio, dtype=np.float32).reshape(-1)
     if x.size == 0:
         return x
-    x = x[: int(max_seconds * sample_rate)]
-    sos = butter(2, 70 / (sample_rate / 2), btype="highpass", output="sos")
+    sos = butter(2, 80 / (sample_rate / 2), btype="highpass", output="sos")
     x = sosfilt(sos, x).astype(np.float32)
     envelope = np.abs(x)
     if envelope.size > sample_rate // 20:
         win = max(1, sample_rate // 50)
         kernel = np.ones(win, dtype=np.float32) / win
         smooth = np.convolve(envelope, kernel, mode="same")
-        keep = np.where(smooth > 0.02)[0]
+        keep = np.where(smooth > 0.012)[0]
         if keep.size > sample_rate // 2:
             pad = int(0.04 * sample_rate)
             x = x[max(0, keep[0] - pad) : min(x.size, keep[-1] + pad)]
+    x = x[: int(max_seconds * sample_rate)]
+    if x.size > 1:
+        x = np.concatenate([[x[0]], x[1:] - 0.62 * x[:-1]]).astype(np.float32)
     rms = float(np.sqrt(np.mean(np.square(x))) + 1e-8)
-    x *= (10 ** (-18.0 / 20.0)) / rms
+    x *= (10 ** (-16.0 / 20.0)) / rms
     peak = float(np.max(np.abs(x)) + 1e-8)
     if peak > 0.89:
         x *= 0.89 / peak
@@ -167,9 +169,9 @@ def clone_voice(tts, refs: list[str]):
     with torch.inference_mode():
         gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
             audio_path=prepared,
-            gpt_cond_len=8,
+            gpt_cond_len=10,
             gpt_cond_chunk_len=4,
-            max_ref_length=8,
+            max_ref_length=10,
             sound_norm_refs=True,
         )
     return gpt_cond_latent, speaker_embedding
