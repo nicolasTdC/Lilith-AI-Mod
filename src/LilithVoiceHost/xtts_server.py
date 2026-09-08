@@ -9,6 +9,7 @@ import argparse
 import io
 import logging
 import os
+import re
 import sys
 import wave
 from pathlib import Path
@@ -177,22 +178,53 @@ def clone_voice(tts, refs: list[str]):
     return gpt_cond_latent, speaker_embedding
 
 
+def _chunk_text(text: str, limit: int = 220) -> list[str]:
+    parts = re.split(r"(?<=[\.\!\?…;:])\s+", text.strip())
+    chunks: list[str] = []
+    current = ""
+    for part in parts:
+        piece = part.strip()
+        if not piece:
+            continue
+        if current and len(current) + 1 + len(piece) > limit:
+            chunks.append(current)
+            current = piece
+        elif current:
+            current = f"{current} {piece}"
+        else:
+            current = piece
+        while len(current) > limit:
+            chunks.append(current[:limit].rsplit(" ", 1)[0] or current[:limit])
+            current = current[len(chunks[-1]):].strip()
+    if current:
+        chunks.append(current)
+    return chunks or [text.strip()]
+
+
 def synthesize(tts, text: str, language: str, gpt_cond_latent, speaker_embedding):
+    import numpy as np
+
     model = tts.synthesizer.tts_model
-    result = model.inference(
-        text=text,
-        language=language,
-        gpt_cond_latent=gpt_cond_latent,
-        speaker_embedding=speaker_embedding,
-        temperature=0.35,
-        length_penalty=1.0,
-        repetition_penalty=7.0,
-        top_k=50,
-        top_p=0.8,
-        speed=1.0,
-        enable_text_splitting=True,
-    )
-    return result["wav"]
+    pieces = []
+    for chunk in _chunk_text(text):
+        result = model.inference(
+            text=chunk,
+            language=language,
+            gpt_cond_latent=gpt_cond_latent,
+            speaker_embedding=speaker_embedding,
+            temperature=0.35,
+            length_penalty=1.0,
+            repetition_penalty=7.0,
+            top_k=50,
+            top_p=0.8,
+            speed=1.0,
+            enable_text_splitting=False,
+        )
+        wav = np.asarray(result["wav"], dtype=np.float32).reshape(-1)
+        if pieces:
+            pieces.append(np.zeros(int(0.12 * 24000), dtype=np.float32))
+        pieces.append(wav)
+    return np.concatenate(pieces) if pieces else np.zeros(1, dtype=np.float32)
 
 
 def main() -> int:

@@ -268,6 +268,7 @@ public sealed class Plugin : BasePlugin
         TryCreateAndPatchAll(typeof(VoiceSettingsButtonClickPatch), PluginGuid + ".voicelanguage", "voice language preference hook");
         TryCreateAndPatchAll(typeof(NewTraySettingsCompatibilityPatches), PluginGuid + ".newtraysettings", "new tray settings compatibility hooks");
         TryCreateAndPatchAll(typeof(AudioManagerAiSpeechGuardPatch), PluginGuid + ".aispeechguard", "AI speech protection against idle voice");
+        TryCreateAndPatchAll(typeof(ApplicationQuitVoiceHostPatch), PluginGuid + ".quitvoicehost", "voice host shutdown on game quit");
         Log.LogInfo($"Loaded. Press {TextInputKey.Value} for text chat; hold {VoiceInputKey.Value} for push-to-talk voice input.");
         if (string.IsNullOrWhiteSpace(GeminiApiKey.Value))
             Log.LogWarning("Gemini ApiKey is empty. Set it in BepInEx/config/community.lilith.textinjector.cfg.");
@@ -2403,6 +2404,30 @@ internal static class DialogueManagerUpdatePatch
         var nltkData = Path.Combine(Paths.BepInExRootPath, "data", "LilithTextInjector", "voice-runtime", "python", "nltk_data");
         if (Directory.Exists(nltkData))
             startInfo.Environment["NLTK_DATA"] = nltkData;
+    }
+
+    internal static void StopVoiceServicesForShutdown()
+    {
+        try { StopLocalVoiceHost(); } catch { }
+        try { StopXttsHost(); } catch { }
+        try
+        {
+            foreach (var leftover in Process.GetProcessesByName("LilithVoiceHost"))
+            {
+                try
+                {
+                    if (!leftover.HasExited)
+                        leftover.Kill(true);
+                }
+                catch
+                {
+                }
+                leftover.Dispose();
+            }
+        }
+        catch
+        {
+        }
     }
 
     private static void StopLocalVoiceHost()
@@ -7658,6 +7683,16 @@ internal static class VoiceSettingsButtonClickPatch
     private static void Postfix(ButtonPressedSwapSprite __instance)
     {
         DialogueManagerUpdatePatch.NotifyVoiceSettingsButtonClicked(__instance);
+    }
+}
+
+[HarmonyPatch(typeof(Application), nameof(Application.Quit))]
+internal static class ApplicationQuitVoiceHostPatch
+{
+    [HarmonyPrefix]
+    private static void Prefix()
+    {
+        DialogueManagerUpdatePatch.StopVoiceServicesForShutdown();
     }
 }
 
