@@ -67,6 +67,7 @@ public sealed class Plugin : BasePlugin
     internal static ConfigEntry<string> PersonaPrompt = null!;
     internal static ConfigEntry<string> CharacterLore = null!;
     internal static ConfigEntry<string> EmotionGuidance = null!;
+    internal static ConfigEntry<string> ReplyLanguage = null!;
     internal static ConfigEntry<float> PostTypingHoldSeconds = null!;
     internal static ConfigEntry<bool> VoiceEnabled = null!;
     internal static ConfigEntry<string> VoiceEndpoint = null!;
@@ -147,6 +148,8 @@ public sealed class Plugin : BasePlugin
         EmotionGuidance = Config.Bind("Character", "EmotionGuidance",
             DefaultEmotionGuidanceZhHant,
             "Controls how visibly Lilith expresses emotion while preserving her restrained personality.");
+        ReplyLanguage = Config.Bind("Character", "ReplyLanguage", string.Empty,
+            "Override AI bubble language. Empty follows the game UI. Use pt-BR for Brazilian Portuguese.");
         PostTypingHoldSeconds = Config.Bind("Display", "PostTypingHoldSeconds", 4f,
             "Seconds an AI bubble remains visible after its typewriter animation finishes.");
         VoiceEnabled = Config.Bind("Voice", "Enabled", true,
@@ -4055,12 +4058,14 @@ internal static class DialogueManagerUpdatePatch
     {
         try
         {
-            var language = GameSetting.Language ?? string.Empty;
+            var language = GetActiveReplyLanguage();
             if (language.StartsWith("ja", StringComparison.OrdinalIgnoreCase))
                 return ("自然な日本語", "中国語や英語の文章を混ぜないこと。", "日本語の吹き出し");
             if (language.StartsWith("zh-CN", StringComparison.OrdinalIgnoreCase)
                 || language.StartsWith("zh-Hans", StringComparison.OrdinalIgnoreCase))
                 return ("自然的简体中文", "不要整句切换成繁体中文、日文或英文。", "简体中文气泡");
+            if (language.StartsWith("pt", StringComparison.OrdinalIgnoreCase))
+                return ("português brasileiro natural", "Não misture frases inteiras em inglês, chinês ou japonês. Use português do Brasil.", "balão em português");
             if (language.StartsWith("en", StringComparison.OrdinalIgnoreCase))
                 return ("natural English", "Do not switch whole sentences into Chinese or Japanese.", "English dialogue bubble");
             if (language.StartsWith("zh", StringComparison.OrdinalIgnoreCase))
@@ -4072,17 +4077,31 @@ internal static class DialogueManagerUpdatePatch
         return ("自然的繁體中文", "不可整句切換成簡體中文、日文或英文。", "繁體中文氣泡");
     }
 
-    private static bool IsEnglishInterface()
+    private static string GetActiveReplyLanguage()
     {
+        var overrideLanguage = Plugin.ReplyLanguage.Value?.Trim() ?? string.Empty;
+        if (overrideLanguage.Length > 0)
+            return overrideLanguage;
         try
         {
-            var language = GameSetting.Language ?? string.Empty;
-            return language.StartsWith("en", StringComparison.OrdinalIgnoreCase);
+            return GameSetting.Language ?? string.Empty;
         }
         catch
         {
-            return false;
+            return string.Empty;
         }
+    }
+
+    private static bool IsEnglishInterface()
+    {
+        var language = GetActiveReplyLanguage();
+        return language.StartsWith("en", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsPortugueseInterface()
+    {
+        var language = GetActiveReplyLanguage();
+        return language.StartsWith("pt", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string SpokenTextForVoice(string traditionalChinese, string simplifiedChinese, string japanese, string english)
@@ -5646,7 +5665,8 @@ internal static class DialogueManagerUpdatePatch
             var speechText = PrepareTextForSpeech(text);
             if (speechText.Length == 0)
                 return;
-            var languages = AiVoiceLanguagePolicy.Resolve(useJapanese, IsEnglishInterface(), speechText);
+            var languages = AiVoiceLanguagePolicy.Resolve(
+                useJapanese, IsEnglishInterface(), IsPortugueseInterface(), speechText);
             useJapanese = languages.UseJapaneseService;
             var referencePath = useJapanese ? Plugin.JapaneseVoiceReferencePath.Value.Trim() : Plugin.VoiceReferencePath.Value.Trim();
             var promptText = useJapanese
@@ -5673,7 +5693,8 @@ internal static class DialogueManagerUpdatePatch
                 return;
             }
 
-            if (languages.TextLang == AiVoiceLanguagePolicy.English
+            if ((languages.TextLang == AiVoiceLanguagePolicy.English
+                    || languages.TextLang == AiVoiceLanguagePolicy.Auto)
                 && speechText.Length > 0
                 && !char.IsPunctuation(speechText[0]))
             {
@@ -5687,7 +5708,7 @@ internal static class DialogueManagerUpdatePatch
                 aux_ref_audio_paths = auxiliaryReferences,
                 prompt_lang = languages.PromptLang,
                 prompt_text = promptText,
-                text_split_method = languages.TextLang == AiVoiceLanguagePolicy.English ? "cut5" : "cut0",
+                text_split_method = languages.TextLang is AiVoiceLanguagePolicy.English or AiVoiceLanguagePolicy.Auto ? "cut5" : "cut0",
                 batch_size = 1,
                 media_type = "wav",
                 streaming_mode = false,

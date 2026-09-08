@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace LilithTextInjector;
 
 internal static class AiVoiceLanguagePolicy
@@ -5,20 +7,49 @@ internal static class AiVoiceLanguagePolicy
     internal const string Chinese = "zh";
     internal const string Japanese = "ja";
     internal const string English = "en";
+    internal const string Auto = "auto";
 
     internal readonly record struct TtsLanguages(string TextLang, string PromptLang, bool UseJapaneseService);
 
-    internal static TtsLanguages Resolve(bool japaneseVoiceMode, bool englishInterface, string speechText)
+    internal static TtsLanguages Resolve(
+        bool japaneseVoiceMode,
+        bool englishInterface,
+        bool portugueseInterface,
+        string speechText)
     {
         if (japaneseVoiceMode)
             return new TtsLanguages(Japanese, Japanese, UseJapaneseService: true);
-        if (LooksLikeEnglish(speechText) || (englishInterface && !LooksLikeCjk(speechText)))
+        if (LooksLikePortuguese(speechText) || (portugueseInterface && !LooksLikeCjk(speechText)))
+            return new TtsLanguages(Auto, Chinese, UseJapaneseService: false);
+        if (LooksLikeEnglish(speechText) || (englishInterface && !LooksLikeCjk(speechText) && !LooksLikePortuguese(speechText)))
             return new TtsLanguages(English, Chinese, UseJapaneseService: false);
         return new TtsLanguages(Chinese, Chinese, UseJapaneseService: false);
     }
 
+    internal static bool LooksLikePortuguese(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return false;
+        var markers = 0;
+        foreach (var ch in text)
+        {
+            if ("ãõâêôçáéíóúàÃÕÂÊÔÇÁÉÍÓÚÀ".IndexOf(ch) >= 0)
+                markers++;
+        }
+        if (markers >= 2)
+            return true;
+        if (markers >= 1 && text.Length >= 12)
+            return true;
+        return Regex.IsMatch(
+            text,
+            @"\b(não|nao|você|voce|vocês|voces|então|entao|também|tambem|hoje|amanhã|amanha|comigo|contigo|pra|pro)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
     internal static bool LooksLikeEnglish(string? text)
     {
+        if (LooksLikePortuguese(text))
+            return false;
         CountLetters(text, out var letters, out var latin, out var cjk);
         return letters >= 8 && latin * 20 >= letters * 14 && cjk * 20 < letters * 3;
     }
