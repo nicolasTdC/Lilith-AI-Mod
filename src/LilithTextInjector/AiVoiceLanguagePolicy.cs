@@ -7,9 +7,14 @@ internal static class AiVoiceLanguagePolicy
     internal const string Chinese = "zh";
     internal const string Japanese = "ja";
     internal const string English = "en";
-    internal const string Auto = "auto";
+    internal const string CutNone = "cut0";
+    internal const string CutPunctuation = "cut5";
 
-    internal readonly record struct TtsLanguages(string TextLang, string PromptLang, bool UseJapaneseService);
+    internal readonly record struct TtsLanguages(
+        string TextLang,
+        string PromptLang,
+        bool UseJapaneseService,
+        string SplitMethod);
 
     internal static TtsLanguages Resolve(
         bool japaneseVoiceMode,
@@ -18,12 +23,14 @@ internal static class AiVoiceLanguagePolicy
         string speechText)
     {
         if (japaneseVoiceMode)
-            return new TtsLanguages(Japanese, Japanese, UseJapaneseService: true);
+            return new TtsLanguages(Japanese, Japanese, UseJapaneseService: true, SplitMethod: CutNone);
+        // GPT-SoVITS has no Portuguese G2P. English phonemes + no split is the
+        // only path that produces audio; multilingual "auto" crashes on pt.
         if (LooksLikePortuguese(speechText) || (portugueseInterface && !LooksLikeCjk(speechText)))
-            return new TtsLanguages(Auto, Chinese, UseJapaneseService: false);
+            return new TtsLanguages(English, Chinese, UseJapaneseService: false, SplitMethod: CutNone);
         if (LooksLikeEnglish(speechText) || (englishInterface && !LooksLikeCjk(speechText) && !LooksLikePortuguese(speechText)))
-            return new TtsLanguages(English, Chinese, UseJapaneseService: false);
-        return new TtsLanguages(Chinese, Chinese, UseJapaneseService: false);
+            return new TtsLanguages(English, Chinese, UseJapaneseService: false, SplitMethod: CutPunctuation);
+        return new TtsLanguages(Chinese, Chinese, UseJapaneseService: false, SplitMethod: CutNone);
     }
 
     internal static bool LooksLikePortuguese(string? text)

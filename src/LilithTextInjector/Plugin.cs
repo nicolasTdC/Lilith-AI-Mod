@@ -5693,8 +5693,7 @@ internal static class DialogueManagerUpdatePatch
                 return;
             }
 
-            if ((languages.TextLang == AiVoiceLanguagePolicy.English
-                    || languages.TextLang == AiVoiceLanguagePolicy.Auto)
+            if (languages.SplitMethod == AiVoiceLanguagePolicy.CutPunctuation
                 && speechText.Length > 0
                 && !char.IsPunctuation(speechText[0]))
             {
@@ -5708,7 +5707,7 @@ internal static class DialogueManagerUpdatePatch
                 aux_ref_audio_paths = auxiliaryReferences,
                 prompt_lang = languages.PromptLang,
                 prompt_text = promptText,
-                text_split_method = languages.TextLang is AiVoiceLanguagePolicy.English or AiVoiceLanguagePolicy.Auto ? "cut5" : "cut0",
+                text_split_method = languages.SplitMethod,
                 batch_size = 1,
                 media_type = "wav",
                 streaming_mode = false,

@@ -24,13 +24,15 @@ Assert(chineseUi.TextLang == AiVoiceLanguagePolicy.Chinese, "Chinese replies mus
 Assert(!chineseUi.UseJapaneseService, "Chinese TTS must use the Chinese voice service.");
 
 var portuguese = AiVoiceLanguagePolicy.Resolve(false, true, true, "Eu senti a sua falta.");
-Assert(portuguese.TextLang == AiVoiceLanguagePolicy.Auto, "Portuguese UI must request multilingual TTS.");
+Assert(portuguese.TextLang == AiVoiceLanguagePolicy.English, "Portuguese must use English G2P because SoVITS has no pt mode.");
+Assert(portuguese.SplitMethod == AiVoiceLanguagePolicy.CutNone, "Portuguese must not be comma-split.");
 Assert(portuguese.PromptLang == AiVoiceLanguagePolicy.Chinese, "Portuguese TTS must keep the Chinese reference prompt.");
 
 var portugueseText = AiVoiceLanguagePolicy.Resolve(false, true, false, "Você não precisa dizer nada agora.");
-Assert(portugueseText.TextLang == AiVoiceLanguagePolicy.Auto, "Portuguese replies must not be treated as English TTS.");
+Assert(portugueseText.TextLang == AiVoiceLanguagePolicy.English, "Portuguese replies must still use English G2P.");
+Assert(portugueseText.SplitMethod == AiVoiceLanguagePolicy.CutNone, "Portuguese replies must stay unsplit.");
 
-Console.WriteLine("Lilith voice language tests passed (10 assertions).");
+Console.WriteLine("Lilith voice language tests passed (12 assertions).");
 
 static void Assert(bool condition, string message)
 {
