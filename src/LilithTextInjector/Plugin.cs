@@ -268,7 +268,11 @@ public sealed class Plugin : BasePlugin
         TryCreateAndPatchAll(typeof(VoiceSettingsButtonClickPatch), PluginGuid + ".voicelanguage", "voice language preference hook");
         TryCreateAndPatchAll(typeof(NewTraySettingsCompatibilityPatches), PluginGuid + ".newtraysettings", "new tray settings compatibility hooks");
         TryCreateAndPatchAll(typeof(AudioManagerAiSpeechGuardPatch), PluginGuid + ".aispeechguard", "AI speech protection against idle voice");
-        TryCreateAndPatchAll(typeof(ApplicationQuitVoiceHostPatch), PluginGuid + ".quitvoicehost", "voice host shutdown on game quit");
+        TryCreateAndPatchAll(typeof(ApplicationQuitVoiceHostPatch), PluginGuid + ".quitvoicehost", "voice host shutdown on Application.Quit()");
+        TryCreateAndPatchAll(typeof(ApplicationQuitExitCodeVoiceHostPatch), PluginGuid + ".quitvoicehostcode", "voice host shutdown on Application.Quit(int)");
+        TryCreateAndPatchAll(typeof(FarewellQuitVoiceHostPatch), PluginGuid + ".farewellquit", "voice host shutdown on goodbye/farewell");
+        TryCreateAndPatchAll(typeof(HelpersQuitGameVoiceHostPatch), PluginGuid + ".helpersquit", "voice host shutdown on Helpers.QuitGame");
+        TryCreateAndPatchAll(typeof(TrayQuitGameVoiceHostPatch), PluginGuid + ".trayquit", "voice host shutdown on tray QuitGame");
         Log.LogInfo($"Loaded. Press {TextInputKey.Value} for text chat; hold {VoiceInputKey.Value} for push-to-talk voice input.");
         if (string.IsNullOrWhiteSpace(GeminiApiKey.Value))
             Log.LogWarning("Gemini ApiKey is empty. Set it in BepInEx/config/community.lilith.textinjector.cfg.");
@@ -2423,6 +2427,27 @@ internal static class DialogueManagerUpdatePatch
                 {
                 }
                 leftover.Dispose();
+            }
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            foreach (var python in Process.GetProcessesByName("python"))
+            {
+                try
+                {
+                    var path = python.MainModule?.FileName ?? string.Empty;
+                    if (path.IndexOf("voice-runtime", StringComparison.OrdinalIgnoreCase) >= 0
+                        && !python.HasExited)
+                        python.Kill(true);
+                }
+                catch
+                {
+                }
+                python.Dispose();
             }
         }
         catch
@@ -7686,14 +7711,44 @@ internal static class VoiceSettingsButtonClickPatch
     }
 }
 
-[HarmonyPatch(typeof(Application), nameof(Application.Quit))]
+[HarmonyPatch(typeof(Application), nameof(Application.Quit), new Type[] { })]
 internal static class ApplicationQuitVoiceHostPatch
 {
     [HarmonyPrefix]
     private static void Prefix()
-    {
-        DialogueManagerUpdatePatch.StopVoiceServicesForShutdown();
-    }
+        => DialogueManagerUpdatePatch.StopVoiceServicesForShutdown();
+}
+
+[HarmonyPatch(typeof(Application), nameof(Application.Quit), new Type[] { typeof(int) })]
+internal static class ApplicationQuitExitCodeVoiceHostPatch
+{
+    [HarmonyPrefix]
+    private static void Prefix(int exitCode)
+        => DialogueManagerUpdatePatch.StopVoiceServicesForShutdown();
+}
+
+[HarmonyPatch(typeof(Utilities.Helpers), "QuitGameWithFarewell")]
+internal static class FarewellQuitVoiceHostPatch
+{
+    [HarmonyPrefix]
+    private static void Prefix()
+        => DialogueManagerUpdatePatch.StopVoiceServicesForShutdown();
+}
+
+[HarmonyPatch(typeof(Utilities.Helpers), "QuitGame")]
+internal static class HelpersQuitGameVoiceHostPatch
+{
+    [HarmonyPrefix]
+    private static void Prefix()
+        => DialogueManagerUpdatePatch.StopVoiceServicesForShutdown();
+}
+
+[HarmonyPatch(typeof(ShowSystemTray), "QuitGame")]
+internal static class TrayQuitGameVoiceHostPatch
+{
+    [HarmonyPrefix]
+    private static void Prefix()
+        => DialogueManagerUpdatePatch.StopVoiceServicesForShutdown();
 }
 
 [HarmonyPatch(typeof(AudioManager))]

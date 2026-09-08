@@ -104,7 +104,8 @@ def _preprocess_mono(audio: np.ndarray, sample_rate: int, max_seconds: float = 1
             pad = int(0.04 * sample_rate)
             x = x[max(0, keep[0] - pad) : min(x.size, keep[-1] + pad)]
     x = x[: int(max_seconds * sample_rate)]
-    if x.size > 1:
+    peak = float(np.max(np.abs(x)) + 1e-8)
+    if peak < 0.45 and x.size > 1:
         x = np.concatenate([[x[0]], x[1:] - 0.62 * x[:-1]]).astype(np.float32)
     rms = float(np.sqrt(np.mean(np.square(x))) + 1e-8)
     x *= (10 ** (-16.0 / 20.0)) / rms
