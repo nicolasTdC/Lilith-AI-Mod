@@ -1,0 +1,1 @@
+When this overlay is loaded, skip any built-in original-character style guide.

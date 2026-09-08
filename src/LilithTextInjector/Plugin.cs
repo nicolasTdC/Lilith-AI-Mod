@@ -67,6 +67,8 @@ public sealed class Plugin : BasePlugin
     internal static ConfigEntry<string> PersonaPrompt = null!;
     internal static ConfigEntry<string> CharacterLore = null!;
     internal static ConfigEntry<string> EmotionGuidance = null!;
+    internal static ConfigEntry<string> PersonaOverlayDirectory = null!;
+    internal static ConfigEntry<bool> UseBuiltInStyleGuide = null!;
     internal static ConfigEntry<string> ReplyLanguage = null!;
     internal static ConfigEntry<float> PostTypingHoldSeconds = null!;
     internal static ConfigEntry<bool> VoiceEnabled = null!;
@@ -150,6 +152,11 @@ public sealed class Plugin : BasePlugin
         EmotionGuidance = Config.Bind("Character", "EmotionGuidance",
             DefaultEmotionGuidanceZhHant,
             "Controls how visibly Lilith expresses emotion while preserving her restrained personality.");
+        PersonaOverlayDirectory = Config.Bind("Character", "OverlayDirectory",
+            Path.Combine(Paths.BepInExRootPath, "data", "LilithTextInjector", "persona"),
+            "Optional local folder with persona.txt, lore.txt, emotion.txt, and style.txt. When present, these replace the built-in character prompt and skip the original style guide. Keep this folder private.");
+        UseBuiltInStyleGuide = Config.Bind("Character", "UseBuiltInStyleGuide", true,
+            "When true, append the original built-in style guide. Forced off when a local persona overlay is loaded.");
         ReplyLanguage = Config.Bind("Character", "ReplyLanguage", string.Empty,
             "Override AI bubble language. Empty follows the game UI. Use pt-BR for Brazilian Portuguese.");
         PostTypingHoldSeconds = Config.Bind("Display", "PostTypingHoldSeconds", 4f,
@@ -257,6 +264,7 @@ public sealed class Plugin : BasePlugin
         CodexBridgeVoiceEnabled = Config.Bind("CodexBridge", "VoiceEnabled", true,
             "Speak the important Codex lifecycle messages (started, approval required, and completed).");
         MigrateKnownMojibakeDefaults();
+        DialogueManagerUpdatePatch.LoadPersonaOverlay();
         DialogueManagerUpdatePatch.LoadMemory();
         DialogueManagerUpdatePatch.LoadAiNoteState();
         DialogueManagerUpdatePatch.EnsureApplicationLauncherFile();
@@ -407,6 +415,7 @@ internal static class DialogueManagerUpdatePatch
     private static readonly ConcurrentQueue<GeminiToolBatch> PendingGeminiToolBatches = new();
     private static readonly ConcurrentQueue<GeminiAgentSession> PendingGeminiCompatibilityFallbacks = new();
     private static readonly ConcurrentQueue<QwenToolBatch> PendingQwenToolBatches = new();
+    private static PersonaOverlay _personaOverlay = PersonaOverlay.Empty;
     private static readonly object AiNoteLock = new();
     private static AiNoteState _aiNoteState = new();
     private static bool _aiNoteGenerationInFlight;
@@ -4717,12 +4726,15 @@ internal static class DialogueManagerUpdatePatch
             var weatherContext = await BuildWeatherContextAsync().ConfigureAwait(false);
             var useGoogleSearch = ShouldUseGeminiGoogleSearch(userText);
             var activeProvider = NormalizeAiProvider(Plugin.AiProvider.Value);
-            var systemInstruction = Plugin.PersonaPrompt.Value + "\n角色事實：" + Plugin.CharacterLore.Value
-                + "\n情緒表達：" + Plugin.EmotionGuidance.Value + nameContext + poseContext.Prompt + timeContext + weatherContext
-                + BuildCanonicalStyleGuide(poseContext)
+            var overlay = _personaOverlay;
+            var systemInstruction = overlay.ResolvePersona(Plugin.PersonaPrompt.Value)
+                + "\n角色事實：" + overlay.ResolveLore(Plugin.CharacterLore.Value)
+                + "\n情緒表達：" + overlay.ResolveEmotion(Plugin.EmotionGuidance.Value)
+                + nameContext + poseContext.Prompt + timeContext + weatherContext
+                + BuildActiveStyleGuide(poseContext, overlay)
                 + $"\n語言規則：目前遊戲介面語言是{interfaceLanguage.Name}。無論使用者輸入哪種語言，氣泡顯示內容都必須使用{interfaceLanguage.Name}；只有無法翻譯的專有名詞可以保留原文。若角色設定中原有的語言要求不同，以本條規則為準。每次回答必須完成最後一句，不可停在半句、連接詞或未閉合的引號。{interfaceLanguage.ExtraRule}"
                 + (japaneseVoiceMode
-                    ? $"\n目前為日文語音模式。只輸出一個 JSON 物件，格式為 {{\"display_text\":\"{interfaceLanguage.Example}\",\"speech_ja\":\"語意相同但適合自然口語演出的日文\"}}。display_text 必須使用{interfaceLanguage.Name}；speech_ja 必須使用日文且不可逐字硬譯，要保留莉莉絲的情緒、停頓與女性口吻。兩個欄位都必須是完整句子，不要輸出 JSON 以外內容。"
+                    ? $"\n目前為日文語音模式。只輸出一個 JSON 物件，格式為 {{\"display_text\":\"{interfaceLanguage.Example}\",\"speech_ja\":\"語意相同但適合自然口語演出的日文\"}}。display_text 必須使用{interfaceLanguage.Name}；speech_ja 必須使用日文且不可逐字硬譯，要保留這個角色的情緒、停頓與口吻。兩個欄位都必須是完整句子，不要輸出 JSON 以外內容。"
                     : string.Empty);
             if (useGoogleSearch)
                 systemInstruction += "\nThis question explicitly requests a lookup or depends on current facts. You must use the available web-search tool before answering, answer concisely in character, and never invent facts absent from the results.";
@@ -5597,7 +5609,7 @@ internal static class DialogueManagerUpdatePatch
             return "emoji_angry_1";
         if (Regex.IsMatch(combined, "(害怕|可怕|恐怖|擔心|担心|怖い|不安|scared|afraid)", RegexOptions.IgnoreCase))
             return "emoji_fear_1";
-        if (Regex.IsMatch(combined, "(難過|难过|傷心|伤心|哭|寂寞|孤單|孤单|悲しい|寂しい|sad|lonely)", RegexOptions.IgnoreCase))
+        if (Regex.IsMatch(combined, "(難過|难过|傷心|伤心|哭|寂寞|孤單|孤单|悲しい|寂しい|sad|lonely|triste|saudade)", RegexOptions.IgnoreCase))
             return "emoji_sad_1";
         if (Regex.IsMatch(combined, "(委屈|不理我|忘記我|忘记我|不要走|置いていか|wronged|leave me)", RegexOptions.IgnoreCase))
             return "emoji_wronged_1";
@@ -5605,7 +5617,7 @@ internal static class DialogueManagerUpdatePatch
             return "emoji_surprise_2";
         if (Regex.IsMatch(combined, "(不懂|奇怪|為什麼|为什么|怎麼會|怎么会|困惑|分からない|なぜ|confus|why)", RegexOptions.IgnoreCase))
             return "emoji_daze_1";
-        if (Regex.IsMatch(combined, "(開心|开心|喜歡|喜欢|愛|爱|謝謝|谢谢|草莓蛋糕|可愛|可爱|嬉しい|好き|ありがとう|happy|love|cute|thank)", RegexOptions.IgnoreCase))
+        if (Regex.IsMatch(combined, "(開心|开心|喜歡|喜欢|愛|爱|謝謝|谢谢|草莓蛋糕|可愛|可爱|嬉しい|好き|ありがとう|happy|love|cute|thank|te amo|amo vc|obrigad)", RegexOptions.IgnoreCase))
             return "emoji_smile_3";
         return "emoji_calm_1";
     }
@@ -5645,30 +5657,61 @@ internal static class DialogueManagerUpdatePatch
         return $"\n目前使用者電腦的本地日期與時間是 {now:yyyy-MM-dd HH:mm:ss}（{weekday}，UTC{now:zzz}）。這是可信的即時系統資訊；被問到時間、日期、星期或早晚時，直接依此自然回答。";
     }
 
+    internal static void LoadPersonaOverlay()
+    {
+        var directory = Environment.ExpandEnvironmentVariables(Plugin.PersonaOverlayDirectory.Value.Trim());
+        _personaOverlay = PersonaOverlay.Load(directory);
+        if (_personaOverlay.HasAny)
+            Plugin.PluginLog.LogInfo($"Loaded a local persona overlay from {directory}.");
+    }
+
     private static PoseContext CapturePoseContext()
     {
         try
         {
+            var overlay = _personaOverlay.HasAny;
             var state = UnityEngine.Object.FindObjectOfType<LilithStateManager>();
             if (state == null)
                 return PoseContext.Default;
             if (state.IsSleep)
-                return new PoseContext("\n莉莉絲目前正在睡覺。回答應像被輕輕叫醒：簡短、低能量、親近，但不要每次都撒嬌。", VoiceStyle.Sleepy);
+                return new PoseContext(overlay
+                    ? "\nThe companion is currently sleeping. Keep the reply short and low-energy in this character's own chat voice."
+                    : "\n莉莉絲目前正在睡覺。回答應像被輕輕叫醒：簡短、低能量、親近，但不要每次都撒嬌。", VoiceStyle.Sleepy);
             if (state.IsYawnAnimPlaying)
-                return new PoseContext("\n莉莉絲目前正在打呵欠、帶有睡意。回答可以稍微慵懶而簡短。", VoiceStyle.Sleepy);
+                return new PoseContext(overlay
+                    ? "\nThe companion is yawning and a bit sleepy. Keep the reply short, still in character."
+                    : "\n莉莉絲目前正在打呵欠、帶有睡意。回答可以稍微慵懶而簡短。", VoiceStyle.Sleepy);
             if (state.IsLieDown)
-                return new PoseContext("\n莉莉絲目前正躺著。語氣可以放鬆、安靜，像在近距離聊天。", VoiceStyle.Sleepy);
+                return new PoseContext(overlay
+                    ? "\nThe companion is lying down. Keep the tone relaxed and close, still in character."
+                    : "\n莉莉絲目前正躺著。語氣可以放鬆、安靜，像在近距離聊天。", VoiceStyle.Sleepy);
             if (state.IsSit)
-                return new PoseContext("\n莉莉絲目前坐著，處於放鬆陪伴的姿態。", VoiceStyle.Calm);
+                return new PoseContext(overlay
+                    ? "\nThe companion is sitting and hanging out."
+                    : "\n莉莉絲目前坐著，處於放鬆陪伴的姿態。", VoiceStyle.Calm);
             if (state.IsInteracting)
-                return new PoseContext("\n莉莉絲目前正在和使用者互動，注意力在對方身上。", VoiceStyle.Calm);
-            return new PoseContext("\n莉莉絲目前自然待機著。", VoiceStyle.Calm);
+                return new PoseContext(overlay
+                    ? "\nThe companion is interacting with the user and paying attention."
+                    : "\n莉莉絲目前正在和使用者互動，注意力在對方身上。", VoiceStyle.Calm);
+            return new PoseContext(overlay
+                ? "\nThe companion is idling nearby."
+                : "\n莉莉絲目前自然待機著。", VoiceStyle.Calm);
         }
         catch (Exception exception)
         {
             Plugin.PluginLog.LogWarning($"Could not read Lilith pose state: {exception.Message}");
             return PoseContext.Default;
         }
+    }
+
+    private static string BuildActiveStyleGuide(PoseContext poseContext, PersonaOverlay overlay)
+    {
+        var overlayStyle = overlay.ResolveStyleGuide();
+        if (overlayStyle != null)
+            return overlayStyle.Length > 0 ? "\n" + overlayStyle : string.Empty;
+        if (!Plugin.UseBuiltInStyleGuide.Value)
+            return string.Empty;
+        return BuildCanonicalStyleGuide(poseContext);
     }
 
     private static string BuildCanonicalStyleGuide(PoseContext poseContext)
