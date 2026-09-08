@@ -1,0 +1,7 @@
+coqui-tts[codec]
+fastapi
+uvicorn[standard]
+soundfile
+torchaudio
+transformers>=4.57,<5
+huggingface-hub>=0.34,<1

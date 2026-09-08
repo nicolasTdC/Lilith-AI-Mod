@@ -24,15 +24,20 @@ Assert(chineseUi.TextLang == AiVoiceLanguagePolicy.Chinese, "Chinese replies mus
 Assert(!chineseUi.UseJapaneseService, "Chinese TTS must use the Chinese voice service.");
 
 var portuguese = AiVoiceLanguagePolicy.Resolve(false, true, true, "Eu senti a sua falta.");
-Assert(portuguese.TextLang == AiVoiceLanguagePolicy.English, "Portuguese must use English G2P because SoVITS has no pt mode.");
+Assert(portuguese.TextLang == AiVoiceLanguagePolicy.Portuguese, "Portuguese must use XTTS language pt.");
+Assert(portuguese.UseXtts, "Portuguese must be routed to XTTS instead of SoVITS.");
 Assert(portuguese.SplitMethod == AiVoiceLanguagePolicy.CutNone, "Portuguese must not be comma-split.");
-Assert(portuguese.PromptLang == AiVoiceLanguagePolicy.Chinese, "Portuguese TTS must keep the Chinese reference prompt.");
+Assert(!portuguese.UseJapaneseService, "Portuguese TTS must not use the Japanese SoVITS service.");
 
 var portugueseText = AiVoiceLanguagePolicy.Resolve(false, true, false, "Você não precisa dizer nada agora.");
-Assert(portugueseText.TextLang == AiVoiceLanguagePolicy.English, "Portuguese replies must still use English G2P.");
+Assert(portugueseText.TextLang == AiVoiceLanguagePolicy.Portuguese, "Portuguese replies must still use XTTS.");
+Assert(portugueseText.UseXtts, "Portuguese replies must still be routed to XTTS.");
 Assert(portugueseText.SplitMethod == AiVoiceLanguagePolicy.CutNone, "Portuguese replies must stay unsplit.");
 
-Console.WriteLine("Lilith voice language tests passed (12 assertions).");
+var englishStillSoVits = AiVoiceLanguagePolicy.Resolve(false, true, false, "I missed you.");
+Assert(!englishStillSoVits.UseXtts, "English must stay on GPT-SoVITS.");
+
+Console.WriteLine("Lilith voice language tests passed (16 assertions).");
 
 static void Assert(bool condition, string message)
 {

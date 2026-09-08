@@ -10,11 +10,14 @@ internal static class AiVoiceLanguagePolicy
     internal const string CutNone = "cut0";
     internal const string CutPunctuation = "cut5";
 
+    internal const string Portuguese = "pt";
+
     internal readonly record struct TtsLanguages(
         string TextLang,
         string PromptLang,
         bool UseJapaneseService,
-        string SplitMethod);
+        string SplitMethod,
+        bool UseXtts = false);
 
     internal static TtsLanguages Resolve(
         bool japaneseVoiceMode,
@@ -24,10 +27,8 @@ internal static class AiVoiceLanguagePolicy
     {
         if (japaneseVoiceMode)
             return new TtsLanguages(Japanese, Japanese, UseJapaneseService: true, SplitMethod: CutNone);
-        // GPT-SoVITS has no Portuguese G2P. English phonemes + no split is the
-        // only path that produces audio; multilingual "auto" crashes on pt.
         if (LooksLikePortuguese(speechText) || (portugueseInterface && !LooksLikeCjk(speechText)))
-            return new TtsLanguages(English, Chinese, UseJapaneseService: false, SplitMethod: CutNone);
+            return new TtsLanguages(Portuguese, Portuguese, UseJapaneseService: false, SplitMethod: CutNone, UseXtts: true);
         if (LooksLikeEnglish(speechText) || (englishInterface && !LooksLikeCjk(speechText) && !LooksLikePortuguese(speechText)))
             return new TtsLanguages(English, Chinese, UseJapaneseService: false, SplitMethod: CutPunctuation);
         return new TtsLanguages(Chinese, Chinese, UseJapaneseService: false, SplitMethod: CutNone);

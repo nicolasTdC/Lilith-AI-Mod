@@ -62,6 +62,34 @@ internal static class Program
                 process.BeginErrorReadLine();
                 owned.Add(process);
             }
+            var xttsPython = Path.Combine(root, "xtts-env", "Scripts", "python.exe");
+            var xttsScript = Path.Combine(root, "xtts_server.py");
+            var xttsRefs = Path.GetFullPath(Path.Combine(root, "..", "voice", "pt"));
+            if (File.Exists(xttsPython) && File.Exists(xttsScript)
+                && (File.Exists(xttsRefs) || Directory.Exists(xttsRefs))
+                && !await PortOpenAsync(9882, 300))
+            {
+                var xttsStart = new ProcessStartInfo
+                {
+                    FileName = xttsPython,
+                    Arguments = $"\"{xttsScript}\" -a 127.0.0.1 -p 9882 --refs \"{xttsRefs}\" --device {(device == "cpu" ? "cpu" : "cuda")}",
+                    WorkingDirectory = root,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                xttsStart.Environment["PYTHONUTF8"] = "1";
+                xttsStart.Environment["PYTHONIOENCODING"] = "utf-8";
+                xttsStart.Environment["COQUI_TOS_AGREED"] = "1";
+                var xttsProcess = Process.Start(xttsStart) ?? throw new InvalidOperationException("Could not start XTTS.");
+                xttsProcess.OutputDataReceived += async (_, e) => { if (e.Data != null) await LogAsync(log, $"[xtts] {e.Data}"); };
+                xttsProcess.ErrorDataReceived += async (_, e) => { if (e.Data != null) await LogAsync(log, $"[xtts:err] {e.Data}"); };
+                xttsProcess.BeginOutputReadLine();
+                xttsProcess.BeginErrorReadLine();
+                owned.Add(xttsProcess);
+            }
             await LogAsync(log, $"Voice host started ({device}); owned processes={owned.Count}.");
             while (parentPid > 0)
             {

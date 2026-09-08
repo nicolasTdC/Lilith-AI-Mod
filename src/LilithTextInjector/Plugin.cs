@@ -78,6 +78,8 @@ public sealed class Plugin : BasePlugin
     internal static ConfigEntry<string> WrongedVoiceReferencePath = null!;
     internal static ConfigEntry<string> SleepyVoiceReferencePath = null!;
     internal static ConfigEntry<string> JapaneseVoiceEndpoint = null!;
+    internal static ConfigEntry<string> PortugueseVoiceEndpoint = null!;
+    internal static ConfigEntry<string> PortugueseVoiceReferencePath = null!;
     internal static ConfigEntry<bool> JapaneseVoiceSelected = null!;
     internal static ConfigEntry<string> JapaneseVoiceReferencePath = null!;
     internal static ConfigEntry<string> JapaneseCalmAuxVoiceReferencePath = null!;
@@ -192,6 +194,11 @@ public sealed class Plugin : BasePlugin
         JapaneseSleepyVoiceReferencePath = Config.Bind("JapaneseVoice", "SleepyReferencePath",
             Path.Combine(Paths.BepInExRootPath, "data", "LilithTextInjector", "voice", "jp", "sleepy-reference.wav"),
             "Japanese auxiliary reference for sleepy speech.");
+        PortugueseVoiceEndpoint = Config.Bind("PortugueseVoice", "Endpoint", "http://127.0.0.1:9882/tts",
+            "XTTS v2 HTTP endpoint used for Portuguese speech cloned from local reference clips.");
+        PortugueseVoiceReferencePath = Config.Bind("PortugueseVoice", "ReferencePath",
+            Path.Combine(Paths.BepInExRootPath, "data", "LilithTextInjector", "voice", "pt"),
+            "File or folder of Portuguese reference clips for XTTS. wav/mp3/ogg/flac are accepted.");
         WeatherEnabled = Config.Bind("Weather", "Enabled", true,
             "Provide current Open-Meteo weather conditions to Lilith.");
         TestNoteOnce = Config.Bind("Notes", "CreateOneTestNote", false,
@@ -482,6 +489,9 @@ internal static class DialogueManagerUpdatePatch
     private static Process? _voiceHostProcess;
     private static bool? _voiceHostJapaneseMode;
     private static float _voiceHostRestartAt;
+    private static bool _xttsLaunchAttempted;
+    private static bool _xttsMissingLogged;
+    private static Process? _xttsProcess;
     private static IntPtr _apiKeyTrayPointer;
     private static bool _apiKeyDialogMode;
     private static volatile bool _apiKeyOpenRequested;
@@ -2310,6 +2320,15 @@ internal static class DialogueManagerUpdatePatch
         if (Time.unscaledTime < 2f)
             return;
 
+        if (!Plugin.VoiceEnabled.Value || !Plugin.VoiceAutoStartLocalService.Value)
+        {
+            StopLocalVoiceHost();
+            StopXttsHost();
+            return;
+        }
+
+        EnsureXttsHost();
+
         var useJapanese = IsJapaneseVoiceMode();
         if (_voiceHostProcess != null)
         {
@@ -2338,12 +2357,6 @@ internal static class DialogueManagerUpdatePatch
 
         if (Time.unscaledTime < _voiceHostRestartAt || _voiceHostLaunchAttempted)
             return;
-
-        if (!Plugin.VoiceEnabled.Value || !Plugin.VoiceAutoStartLocalService.Value)
-        {
-            StopLocalVoiceHost();
-            return;
-        }
 
         try
         {
@@ -2415,6 +2428,101 @@ internal static class DialogueManagerUpdatePatch
             process.Dispose();
         }
     }
+
+    private static void EnsureXttsHost()
+    {
+        if (_xttsProcess != null)
+        {
+            try
+            {
+                if (_xttsProcess.HasExited)
+                {
+                    _xttsProcess.Dispose();
+                    _xttsProcess = null;
+                    _xttsLaunchAttempted = false;
+                }
+            }
+            catch
+            {
+                StopXttsHost();
+            }
+        }
+
+        if (_xttsProcess != null || _xttsLaunchAttempted)
+            return;
+
+        var endpoint = Plugin.PortugueseVoiceEndpoint.Value.Trim();
+        if (!IsLocalVoiceEndpoint(endpoint))
+            return;
+
+        var hostPath = Environment.ExpandEnvironmentVariables(Plugin.VoiceHostPath.Value.Trim());
+        var runtime = Path.GetDirectoryName(hostPath) ?? string.Empty;
+        var python = Path.Combine(runtime, "xtts-env", "Scripts", "python.exe");
+        var script = Path.Combine(runtime, "xtts_server.py");
+        var refs = Environment.ExpandEnvironmentVariables(Plugin.PortugueseVoiceReferencePath.Value.Trim());
+        if (!File.Exists(python) || !File.Exists(script) || !HasSpeechReference(refs))
+        {
+            if (!_xttsMissingLogged)
+            {
+                _xttsMissingLogged = true;
+                Plugin.PluginLog.LogInfo("Portuguese XTTS sidecar is not installed in the voice runtime; Portuguese speech uses http://127.0.0.1:9882/tts if that service is already running.");
+            }
+            return;
+        }
+
+        var port = 9882;
+        if (Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) && uri.IsLoopback && uri.Port > 0)
+            port = uri.Port;
+
+        try
+        {
+            _xttsLaunchAttempted = true;
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = python,
+                Arguments = $"\"{script}\" -a 127.0.0.1 -p {port} --refs \"{refs}\" --device cuda",
+                WorkingDirectory = runtime,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            ApplyUtf8PythonEnvironment(startInfo);
+            startInfo.Environment["COQUI_TOS_AGREED"] = "1";
+            _xttsProcess = Process.Start(startInfo);
+            Plugin.PluginLog.LogInfo($"Started Portuguese XTTS sidecar on port {port}.");
+        }
+        catch (Exception exception)
+        {
+            _xttsLaunchAttempted = false;
+            Plugin.PluginLog.LogWarning($"Could not start Portuguese XTTS: {exception.Message}");
+        }
+    }
+
+    private static void StopXttsHost()
+    {
+        var process = _xttsProcess;
+        _xttsProcess = null;
+        _xttsLaunchAttempted = false;
+        if (process == null)
+            return;
+
+        try
+        {
+            if (!process.HasExited)
+                process.Kill(true);
+        }
+        catch (Exception exception)
+        {
+            Plugin.PluginLog.LogWarning($"Could not stop Portuguese XTTS: {exception.Message}");
+        }
+        finally
+        {
+            process.Dispose();
+        }
+    }
+
+    private static bool HasSpeechReference(string path)
+        => !string.IsNullOrWhiteSpace(path) && (File.Exists(path) || Directory.Exists(path));
 
     private static void HandleVoiceInput(DialogueManager manager)
     {
@@ -5668,57 +5776,82 @@ internal static class DialogueManagerUpdatePatch
             var languages = AiVoiceLanguagePolicy.Resolve(
                 useJapanese, IsEnglishInterface(), IsPortugueseInterface(), speechText);
             useJapanese = languages.UseJapaneseService;
-            var referencePath = useJapanese ? Plugin.JapaneseVoiceReferencePath.Value.Trim() : Plugin.VoiceReferencePath.Value.Trim();
-            var promptText = useJapanese
-                ? "これは儀式でもあるの。君に私の存在を感じてもらうための儀式ね。"
-                : "你的選擇創造了我，所以我的存在本身就是你的善意。";
-            var effectiveStyle = reaction?.Style ?? poseStyle;
-            var auxiliaryReferences = useJapanese ? effectiveStyle switch
+            string payloadJson;
+            string endpoint;
+            int maximumAttempts;
+            if (languages.UseXtts)
             {
-                VoiceStyle.Excited => new[] { Plugin.JapaneseExcitedVoiceReferencePath.Value.Trim() },
-                VoiceStyle.Wronged => new[] { Plugin.JapaneseWrongedVoiceReferencePath.Value.Trim() },
-                VoiceStyle.Sleepy => new[] { Plugin.JapaneseSleepyVoiceReferencePath.Value.Trim() },
-                _ => new[] { Plugin.JapaneseCalmAuxVoiceReferencePath.Value.Trim() }
-            } : effectiveStyle switch
-            {
-                VoiceStyle.Excited => new[] { Plugin.ExcitedVoiceReferencePath.Value.Trim() },
-                VoiceStyle.Wronged => new[] { Plugin.WrongedVoiceReferencePath.Value.Trim() },
-                VoiceStyle.Sleepy => new[] { Plugin.SleepyVoiceReferencePath.Value.Trim() },
-                _ => Array.Empty<string>()
-            };
-            auxiliaryReferences = Array.FindAll(auxiliaryReferences, File.Exists);
-            if (!File.Exists(referencePath))
-            {
-                Plugin.PluginLog.LogWarning($"Voice reference was not found: {referencePath}");
-                return;
-            }
+                var portugueseRefs = Environment.ExpandEnvironmentVariables(Plugin.PortugueseVoiceReferencePath.Value.Trim());
+                if (!HasSpeechReference(portugueseRefs))
+                {
+                    Plugin.PluginLog.LogWarning($"Portuguese XTTS reference was not found: {portugueseRefs}");
+                    return;
+                }
 
-            if (languages.SplitMethod == AiVoiceLanguagePolicy.CutPunctuation
-                && speechText.Length > 0
-                && !char.IsPunctuation(speechText[0]))
-            {
-                speechText = "... " + speechText;
+                endpoint = Plugin.PortugueseVoiceEndpoint.Value.Trim();
+                payloadJson = JsonSerializer.Serialize(new
+                {
+                    text = speechText,
+                    language = AiVoiceLanguagePolicy.Portuguese,
+                    speaker_wav = portugueseRefs,
+                    media_type = "wav"
+                });
+                Plugin.PluginLog.LogInfo("Using XTTS Portuguese TTS cloned from local reference clips.");
+                maximumAttempts = IsLocalVoiceEndpoint(endpoint) && Plugin.VoiceAutoStartLocalService.Value ? 12 : 1;
             }
-            var payload = new
+            else
             {
-                text = speechText,
-                text_lang = languages.TextLang,
-                ref_audio_path = referencePath,
-                aux_ref_audio_paths = auxiliaryReferences,
-                prompt_lang = languages.PromptLang,
-                prompt_text = promptText,
-                text_split_method = languages.SplitMethod,
-                batch_size = 1,
-                media_type = "wav",
-                streaming_mode = false,
-                seed = 42
-            };
-            var endpoint = useJapanese ? Plugin.JapaneseVoiceEndpoint.Value.Trim() : Plugin.VoiceEndpoint.Value.Trim();
-            Plugin.PluginLog.LogInfo(
-                $"Using {languages.TextLang} TTS (prompt {languages.PromptLang}) on the {(useJapanese ? "Japanese" : "Chinese")} voice service.");
-            var payloadJson = JsonSerializer.Serialize(payload);
-            var localEndpoint = IsLocalVoiceEndpoint(endpoint);
-            var maximumAttempts = localEndpoint && Plugin.VoiceAutoStartLocalService.Value ? 7 : 1;
+                var referencePath = useJapanese ? Plugin.JapaneseVoiceReferencePath.Value.Trim() : Plugin.VoiceReferencePath.Value.Trim();
+                var promptText = useJapanese
+                    ? "これは儀式でもあるの。君に私の存在を感じてもらうための儀式ね。"
+                    : "你的選擇創造了我，所以我的存在本身就是你的善意。";
+                var effectiveStyle = reaction?.Style ?? poseStyle;
+                var auxiliaryReferences = useJapanese ? effectiveStyle switch
+                {
+                    VoiceStyle.Excited => new[] { Plugin.JapaneseExcitedVoiceReferencePath.Value.Trim() },
+                    VoiceStyle.Wronged => new[] { Plugin.JapaneseWrongedVoiceReferencePath.Value.Trim() },
+                    VoiceStyle.Sleepy => new[] { Plugin.JapaneseSleepyVoiceReferencePath.Value.Trim() },
+                    _ => new[] { Plugin.JapaneseCalmAuxVoiceReferencePath.Value.Trim() }
+                } : effectiveStyle switch
+                {
+                    VoiceStyle.Excited => new[] { Plugin.ExcitedVoiceReferencePath.Value.Trim() },
+                    VoiceStyle.Wronged => new[] { Plugin.WrongedVoiceReferencePath.Value.Trim() },
+                    VoiceStyle.Sleepy => new[] { Plugin.SleepyVoiceReferencePath.Value.Trim() },
+                    _ => Array.Empty<string>()
+                };
+                auxiliaryReferences = Array.FindAll(auxiliaryReferences, File.Exists);
+                if (!File.Exists(referencePath))
+                {
+                    Plugin.PluginLog.LogWarning($"Voice reference was not found: {referencePath}");
+                    return;
+                }
+
+                if (languages.SplitMethod == AiVoiceLanguagePolicy.CutPunctuation
+                    && speechText.Length > 0
+                    && !char.IsPunctuation(speechText[0]))
+                {
+                    speechText = "... " + speechText;
+                }
+                payloadJson = JsonSerializer.Serialize(new
+                {
+                    text = speechText,
+                    text_lang = languages.TextLang,
+                    ref_audio_path = referencePath,
+                    aux_ref_audio_paths = auxiliaryReferences,
+                    prompt_lang = languages.PromptLang,
+                    prompt_text = promptText,
+                    text_split_method = languages.SplitMethod,
+                    batch_size = 1,
+                    media_type = "wav",
+                    streaming_mode = false,
+                    seed = 42
+                });
+                endpoint = useJapanese ? Plugin.JapaneseVoiceEndpoint.Value.Trim() : Plugin.VoiceEndpoint.Value.Trim();
+                Plugin.PluginLog.LogInfo(
+                    $"Using {languages.TextLang} TTS (prompt {languages.PromptLang}) on the {(useJapanese ? "Japanese" : "Chinese")} voice service.");
+                var localEndpoint = IsLocalVoiceEndpoint(endpoint);
+                maximumAttempts = localEndpoint && Plugin.VoiceAutoStartLocalService.Value ? 7 : 1;
+            }
             for (var attempt = 1; attempt <= maximumAttempts; attempt++)
             {
                 try

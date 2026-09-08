@@ -11,6 +11,11 @@ BepInEx/data/LilithTextInjector/memory/
 *.secret
 .env
 
+# Local personal files — never commit or push
+personal_data/
+.venv-xtts/
+.venv/
+
 # Release binaries belong in GitHub Releases, not repository history
 LilithAI-Mod-Setup.exe
 packages/
