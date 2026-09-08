@@ -13,6 +13,8 @@ BepInEx/data/LilithTextInjector/memory/
 
 # Local personal files — never commit or push
 personal_data/
+src/LilithTextInjector/watch-subtitle/
+**/watch-subtitles/
 .venv-xtts/
 .venv/
 

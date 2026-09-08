@@ -202,9 +202,30 @@ def _chunk_text(text: str, limit: int = 220) -> list[str]:
     return chunks or [text.strip()]
 
 
-def synthesize(tts, text: str, language: str, gpt_cond_latent, speaker_embedding):
+STYLE_PRESETS = {
+    "excited": {"temperature": 0.72, "speed": 1.12, "pitch": 1.35, "energy": 1.08},
+    "calm": {"temperature": 0.42, "speed": 0.98, "pitch": 0.15, "energy": 1.0},
+    "sad": {"temperature": 0.5, "speed": 0.86, "pitch": -1.15, "energy": 0.9},
+    "sleepy": {"temperature": 0.4, "speed": 0.8, "pitch": -0.7, "energy": 0.86},
+}
+
+
+def _shift_pitch(wav: np.ndarray, semitones: float) -> np.ndarray:
+    if abs(semitones) < 0.05 or wav.size < 8:
+        return wav
+    factor = float(2 ** (semitones / 12.0))
+    src = np.arange(wav.size, dtype=np.float64)
+    dest = np.arange(0, wav.size, factor, dtype=np.float64)
+    shifted = np.interp(dest, src, wav).astype(np.float32)
+    # Restore approximate duration so pitch moves independently of XTTS speed.
+    restored_x = np.linspace(0, shifted.size - 1, wav.size, dtype=np.float64)
+    return np.interp(restored_x, np.arange(shifted.size, dtype=np.float64), shifted).astype(np.float32)
+
+
+def synthesize(tts, text: str, language: str, gpt_cond_latent, speaker_embedding, style: str = "calm"):
     import numpy as np
 
+    preset = STYLE_PRESETS.get((style or "calm").strip().lower(), STYLE_PRESETS["calm"])
     model = tts.synthesizer.tts_model
     pieces = []
     for chunk in _chunk_text(text):
@@ -213,18 +234,24 @@ def synthesize(tts, text: str, language: str, gpt_cond_latent, speaker_embedding
             language=language,
             gpt_cond_latent=gpt_cond_latent,
             speaker_embedding=speaker_embedding,
-            temperature=0.35,
+            temperature=float(preset["temperature"]),
             length_penalty=1.0,
             repetition_penalty=7.0,
             top_k=50,
-            top_p=0.8,
-            speed=1.0,
+            top_p=0.85,
+            speed=float(preset["speed"]),
             enable_text_splitting=False,
         )
         wav = np.asarray(result["wav"], dtype=np.float32).reshape(-1)
+        wav = _shift_pitch(wav, float(preset["pitch"]))
+        wav *= float(preset["energy"])
+        peak = float(np.max(np.abs(wav)) + 1e-8)
+        if peak > 0.95:
+            wav *= 0.95 / peak
         if pieces:
-            pieces.append(np.zeros(int(0.12 * 24000), dtype=np.float32))
-        pieces.append(wav)
+            gap = 0.08 if style == "excited" else 0.16 if style == "sad" else 0.12
+            pieces.append(np.zeros(int(gap * 24000), dtype=np.float32))
+        pieces.append(wav.astype(np.float32))
     return np.concatenate(pieces) if pieces else np.zeros(1, dtype=np.float32)
 
 
@@ -260,7 +287,8 @@ def main() -> int:
             "language": "pt",
             "refs": default_refs,
             "sample_rate": rate,
-            "temperature": 0.35,
+            "temperature": 0.42,
+            "styles": list(STYLE_PRESETS),
         }
 
     @app.post("/tts")
@@ -293,7 +321,9 @@ def main() -> int:
             if key != cached_key:
                 gpt_cond_latent, speaker_embedding = clone_voice(tts, refs)
                 cached_key = key
-            wav = synthesize(tts, text, language, gpt_cond_latent, speaker_embedding)
+            style = str(body.get("style") or body.get("mood") or "calm").strip().lower()
+            wav = synthesize(tts, text, language, gpt_cond_latent, speaker_embedding, style=style)
+            LOG.info("Synthesized %s chars style=%s", len(text), style)
             return Response(content=encode_wav(wav, rate), media_type="audio/wav")
         except Exception as exception:
             LOG.exception("XTTS synthesis failed")

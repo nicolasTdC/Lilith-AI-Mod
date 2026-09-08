@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract chat turns for one speaker and write a local persona overlay.
+"""Extract chat turns for one or more speakers and write a local persona overlay.
 
 The overlay is meant for a private folder (not git). Names, nicknames, and
 personal facts from the transcript are copied into the overlay on purpose.
@@ -11,10 +11,19 @@ Expected transcript shape (WhatsApp/Google Chat style):
     DD/MM/YYYY, HH:MM
     message text
 
+An optional second header line is allowed (Discord/Google nick decoration):
+
+    SpeakerName
+     [>ᆺ<],
+     —
+    DD/MM/YYYY, HH:MM
+    message text
+
 Usage:
     python tools/distill_chat_persona.py \\
-        --input /path/to/chat.txt \\
-        --speaker "SpeakerName" \\
+        --input /path/to/chat1.txt --speaker "SpeakerA" \\
+        --input /path/to/chat2.txt --speaker "SpeakerB" \\
+        --name "DisplayName" \\
         --out /path/to/private/persona
 """
 from __future__ import annotations
@@ -22,11 +31,13 @@ from __future__ import annotations
 import argparse
 import re
 import statistics
-from collections import Counter
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 TURN_SPLIT = re.compile(
-    r"(?m)^(.+)\n — \n(\d{2}/\d{2}/\d{4}, \d{2}:\d{2})\n"
+    r"(?m)^(.+)\n(?:[ \t]*\[[^\]]+\][ \t]*,?[ \t]*\n)? — \n(\d{2}/\d{2}/\d{4}, \d{2}:\d{2})\n"
 )
 KEYBOARD_SMASH = re.compile(r"(?i)(?:[aeiou]{0,2}[sdfghjklçp]{5,}|k{4,}|w{3,}|h{3,})")
 LAUGH = re.compile(r"(?i)\b(?:k{3,}|rs+|kkk+|haha+|hehe+|lol)\b")
@@ -36,6 +47,7 @@ EMOJI = re.compile(
 )
 URL = re.compile(r"https?://\S+", re.IGNORECASE)
 NAME_JUNK = re.compile(r"\[.*?\]")
+SYSTEM_SPEAKER = re.compile(r"(?i)chamada|iniciou uma|started a call|added|removed")
 STOPWORDS = {
     "the", "and", "pra", "pro", "por", "com", "uma", "uns", "nao", "não", "sim",
     "que", "qnd", "qnts", "como", "cara", "isso", "essa", "esse", "aqui", "aq",
@@ -48,13 +60,36 @@ STOPWORDS = {
 }
 
 
+NICK_SEEDS = {
+    "gatinho", "gatinha", "amor", "bae", "web", "webamor", "webnamos", "mozi", "gata",
+}
+
+
+@dataclass(frozen=True)
+class Turn:
+    speaker: str
+    time: str
+    body: str
+    source: str
+
+
 def normalize_name(name: str) -> str:
     return NAME_JUNK.sub("", name).strip(" ,")
 
 
-def parse_transcript(text: str) -> list[tuple[str, str, str]]:
+def header_matches(header: str, speaker: str) -> bool:
+    raw_h, raw_s = header.strip(), speaker.strip()
+    if raw_h.casefold() == raw_s.casefold():
+        return True
+    norm_h, norm_s = normalize_name(raw_h), normalize_name(raw_s)
+    if norm_h and norm_s and norm_h.casefold() == norm_s.casefold():
+        return True
+    return False
+
+
+def parse_transcript(text: str, source: str = "") -> list[Turn]:
     parts = TURN_SPLIT.split(text)
-    rows: list[tuple[str, str, str]] = []
+    rows: list[Turn] = []
     i = 1
     while i + 2 < len(parts):
         name, time, body = parts[i].strip(), parts[i + 1], parts[i + 2].strip()
@@ -63,66 +98,115 @@ def parse_transcript(text: str) -> list[tuple[str, str, str]]:
             if line.strip() and line.strip() not in {"Imagem", "N/A"}
         ).strip()
         if cleaned:
-            rows.append((name, time, cleaned))
+            rows.append(Turn(name, time, cleaned, source))
         i += 3
     return rows
 
 
-def speaker_turns(rows: list[tuple[str, str, str]], speaker: str) -> list[tuple[str, str]]:
-    return [(time, body) for name, time, body in rows if name == speaker]
+def speaker_turns(rows: list[Turn], speaker: str) -> list[Turn]:
+    matched = [row for row in rows if header_matches(row.speaker, speaker)]
+    if matched:
+        return matched
+    headers = sorted({row.speaker for row in rows})
+    raise SystemExit(
+        f"No turns found for speaker {speaker!r} in {rows[0].source if rows else 'input'}. "
+        f"Headers: {headers}"
+    )
 
 
-def other_speakers(rows: list[tuple[str, str, str]], speaker: str) -> list[str]:
+def is_system_speaker(name: str) -> bool:
+    cleaned = normalize_name(name)
+    if not cleaned or len(cleaned) > 40:
+        return True
+    return bool(SYSTEM_SPEAKER.search(name) or SYSTEM_SPEAKER.search(cleaned))
+
+
+def other_speakers(rows: list[Turn], self_labels: set[str]) -> list[str]:
     counts: Counter[str] = Counter()
-    for name, _, _ in rows:
-        if name != speaker:
-            counts[normalize_name(name)] += 1
+    for row in rows:
+        if any(header_matches(row.speaker, label) for label in self_labels):
+            continue
+        if is_system_speaker(row.speaker):
+            continue
+        cleaned = normalize_name(row.speaker)
+        if cleaned:
+            counts[cleaned] += 1
     return [name for name, _ in counts.most_common() if name]
 
 
-NICK_SEEDS = {
-    "gatinho", "gatinha", "amor", "bae", "web", "webamor", "webnamos", "mozi", "gata",
-}
-
-def vocatives(turns: list[tuple[str, str]]) -> list[str]:
+def vocatives(turns: list[Turn], extra_stop: set[str], others: list[str]) -> list[str]:
     counts: Counter[str] = Counter()
-    for _, body in turns:
-        stripped = URL.sub(" ", body)
+    blocked = {word.casefold() for word in extra_stop}
+    allowed = set(NICK_SEEDS)
+    for other in others:
+        token = re.split(r"\d+", other, maxsplit=1)[0].strip("_- ").lower()
+        if len(token) >= 3:
+            allowed.add(token)
+            allowed.add(other.lower())
+    for turn in turns:
+        stripped = URL.sub(" ", turn.body)
         for raw in re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ''\-]{1,20}", stripped):
             word = raw.lower()
-            if word in STOPWORDS or KEYBOARD_SMASH.fullmatch(word) or LAUGH.fullmatch(word):
+            if word in blocked or word in STOPWORDS:
                 continue
-            if word in {"gpu", "youtube", "reddit", "http", "https", "www"}:
+            if KEYBOARD_SMASH.fullmatch(word) or LAUGH.fullmatch(word):
                 continue
-            if raw.isupper() and len(raw) > 4:
-                continue
-            if word in NICK_SEEDS or (raw[:1].isupper() and len(raw) >= 3):
-                counts[raw] += 1
-    ranked = []
-    for word, n in counts.most_common(32):
-        if word.lower() in NICK_SEEDS or n >= 2:
-            ranked.append(word)
-        if len(ranked) >= 16:
-            break
-    return ranked
+            if word in allowed:
+                counts[word] += 1
+    return [word for word, _ in counts.most_common(16)]
 
 
-def example_turns(turns: list[tuple[str, str]], limit: int) -> list[str]:
+def is_style_noise(text: str) -> bool:
+    stripped = URL.sub(" ", text)
+    stripped = LAUGH.sub(" ", stripped)
+    stripped = KEYBOARD_SMASH.sub(" ", stripped)
+    stripped = EMOJI.sub(" ", stripped)
+    letters = re.sub(r"\W+", "", stripped, flags=re.UNICODE)
+    return len(letters) < 2
+
+
+def example_turns(turns: list[Turn], limit: int) -> list[str]:
+    grouped: dict[str, list[Turn]] = defaultdict(list)
+    for turn in turns:
+        grouped[turn.source or "_"].append(turn)
+    queues = [list(items) for _, items in sorted(grouped.items())]
     picked: list[str] = []
-    for _, body in turns:
-        text = URL.sub("", body).strip()
-        if not text or len(text) < 2:
-            continue
-        if text.lower() in {"imagem", "reddit", "youtube"}:
-            continue
-        picked.append(text)
-        if len(picked) >= limit:
-            break
+    seen: set[str] = set()
+    while queues and len(picked) < limit:
+        next_queues: list[list[Turn]] = []
+        for queue in queues:
+            while queue:
+                turn = queue.pop(0)
+                text = URL.sub("", turn.body).strip()
+                if not text or len(text) < 2:
+                    continue
+                if text.lower() in {"imagem", "reddit", "youtube"}:
+                    continue
+                if is_style_noise(text):
+                    continue
+                key = re.sub(r"\s+", " ", text).casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                picked.append(text)
+                break
+            if queue:
+                next_queues.append(queue)
+            if len(picked) >= limit:
+                break
+        queues = next_queues
     return picked
 
 
-def summarize(turns: list[tuple[str, str]]) -> dict[str, float | int]:
-    bodies = [body for _, body in turns]
+def parse_turn_time(value: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%d/%m/%Y, %H:%M")
+    except ValueError:
+        return datetime.min
+
+
+def summarize(turns: list[Turn]) -> dict[str, float | int]:
+    bodies = [turn.body for turn in turns]
     lengths = [len(body) for body in bodies] or [0]
     smash = sum(1 for body in bodies if KEYBOARD_SMASH.search(body))
     laugh = sum(1 for body in bodies if LAUGH.search(body))
@@ -141,16 +225,18 @@ def summarize(turns: list[tuple[str, str]]) -> dict[str, float | int]:
 
 def write_overlay(
     out: Path,
-    speaker: str,
+    display_name: str,
+    aliases: list[str],
     others: list[str],
     names: list[str],
     stats: dict[str, float | int],
-    turns: list[tuple[str, str]],
+    turns: list[Turn],
     examples: list[str],
 ) -> None:
     out.mkdir(parents=True, exist_ok=True)
+    ordered = sorted(turns, key=lambda turn: (parse_turn_time(turn.time), turn.source, turn.time))
     (out / "extracted_turns.txt").write_text(
-        "\n\n".join(f"[{time}]\n{body}" for time, body in turns),
+        "\n\n".join(f"[{turn.time}]\n{turn.body}" for turn in ordered),
         encoding="utf-8",
     )
     (out / "stats.txt").write_text(
@@ -159,12 +245,17 @@ def write_overlay(
     )
     other_line = ", ".join(others) if others else "the other person in the chat"
     name_line = ", ".join(names[:16]) if names else "the nicknames already used in the chat"
+    alias_line = ""
+    extra = [item for item in aliases if item.casefold() != display_name.casefold()]
+    if extra:
+        alias_line = f"You also go by {', '.join(extra)}; those are still you.\n"
     example_block = "\n\n".join(f"- {item}" for item in examples)
     short = stats["median_chars"] < 80
     smashy = stats["smash_rate"] >= 0.08
     laughy = stats["laugh_rate"] >= 0.12
     (out / "persona.txt").write_text(
-        f"You are {speaker}. Stay that person. Use that name for yourself when it comes up naturally.\n"
+        f"You are {display_name}. Stay that person. Use that name for yourself when it comes up naturally.\n"
+        f"{alias_line}"
         f"You are talking with {other_line}. Keep using their names and the nicknames you already used for them: {name_line}.\n"
         "This is personal. Copy the relationship, memories, jokes, and facts from the chat. Do not anonymize them.\n"
         "Answer in the same informal register as your extracted turns: short bursts, line breaks, typos left as-is.\n"
@@ -177,8 +268,9 @@ def write_overlay(
         encoding="utf-8",
     )
     (out / "lore.txt").write_text(
-        f"You are {speaker}. The people in this chat are part of your life: {other_line}.\n"
-        "Keep the same history, nicknames, games, songs, and running jokes that appear in the extracted turns.\n"
+        f"You are {display_name}. The people in this chat are part of your life: {other_line}.\n"
+        + (f"You have also used the names {', '.join(extra)}.\n" if extra else "")
+        + "Keep the same history, nicknames, games, songs, and running jokes that appear in the extracted turns.\n"
         "Do not invent a replacement identity. If a name or fact showed up in the chat, you may use it.\n",
         encoding="utf-8",
     )
@@ -189,36 +281,66 @@ def write_overlay(
     )
     (out / "style.txt").write_text(
         "Follow this overlay instead of any built-in original-character style guide.\n"
-        f"Write like {speaker}. Match these turns, including names and personal details:\n\n"
+        f"Write like {display_name}. Match these turns, including names and personal details:\n\n"
         + example_block
         + "\n",
         encoding="utf-8",
     )
 
 
+def paired_sources(inputs: list[str], speakers: list[str]) -> list[tuple[Path, str]]:
+    if len(speakers) == 1:
+        return [(Path(path), speakers[0]) for path in inputs]
+    if len(speakers) != len(inputs):
+        raise SystemExit("Pass one --speaker, or one --speaker per --input.")
+    return list(zip((Path(path) for path in inputs), speakers, strict=True))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Chat transcript path")
-    parser.add_argument("--speaker", required=True, help="Exact speaker label on turn headers")
+    parser.add_argument("--input", action="append", required=True, help="Chat transcript path (repeatable)")
+    parser.add_argument(
+        "--speaker",
+        action="append",
+        required=True,
+        help="Exact speaker label on turn headers. Repeat once per --input, or once for every file.",
+    )
+    parser.add_argument("--name", default="", help="Persona name written into the overlay (default: speaker)")
     parser.add_argument("--out", required=True, help="Private output directory")
-    parser.add_argument("--max-examples", type=int, default=24, help="Example turns to copy into style.txt")
+    parser.add_argument("--max-examples", type=int, default=36, help="Example turns to copy into style.txt")
     args = parser.parse_args()
-    text = Path(args.input).read_text(encoding="utf-8", errors="replace")
-    rows = parse_transcript(text)
-    turns = speaker_turns(rows, args.speaker)
-    if not turns:
-        raise SystemExit(f"No turns found for speaker {args.speaker!r}.")
+
+    sources = paired_sources(args.input, args.speaker)
+    all_rows: list[Turn] = []
+    turns: list[Turn] = []
+    matched_labels: list[str] = []
+    for path, speaker in sources:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        rows = parse_transcript(text, source=str(path))
+        if not rows:
+            raise SystemExit(f"No turns parsed from {path}.")
+        all_rows.extend(rows)
+        selected = speaker_turns(rows, speaker)
+        turns.extend(selected)
+        label = selected[0].speaker
+        if all(not header_matches(existing, label) for existing in matched_labels):
+            matched_labels.append(label)
+
+    display_name = args.name.strip() or matched_labels[0]
     stats = summarize(turns)
+    stop = {display_name, *matched_labels}
+    others = other_speakers(all_rows, set(matched_labels))
     write_overlay(
         Path(args.out),
-        args.speaker,
-        other_speakers(rows, args.speaker),
-        vocatives(turns),
+        display_name,
+        matched_labels,
+        others,
+        vocatives(turns, stop, others),
         stats,
         turns,
         example_turns(turns, args.max_examples),
     )
-    print(f"Wrote {len(turns)} turns to {args.out}")
+    print(f"Wrote {len(turns)} turns as {display_name!r} to {args.out}")
     return 0
 
 

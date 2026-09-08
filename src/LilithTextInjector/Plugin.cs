@@ -102,6 +102,7 @@ public sealed class Plugin : BasePlugin
     internal static ConfigEntry<double> WeatherLongitude = null!;
     internal static ConfigEntry<bool> ReactionSoundsEnabled = null!;
     internal static ConfigEntry<string> ReactionSoundsDirectory = null!;
+    internal static ConfigEntry<float> VoicePlaybackGain = null!;
     internal static ConfigEntry<float> ReactionFollowupPitch = null!;
     internal static ConfigEntry<bool> CollectUnvoicedNativeLines = null!;
     internal static ConfigEntry<bool> NativeVoicePackEnabled = null!;
@@ -206,6 +207,8 @@ public sealed class Plugin : BasePlugin
         PortugueseVoiceReferencePath = Config.Bind("PortugueseVoice", "ReferencePath",
             Path.Combine(Paths.BepInExRootPath, "data", "LilithTextInjector", "voice", "pt"),
             "File or folder of Portuguese reference clips for XTTS. wav/mp3/ogg/flac are accepted.");
+        VoicePlaybackGain = Config.Bind("Voice", "PlaybackGain", 1f,
+            "Loudness of synthesized speech. 1 peak-normalizes to near full volume; 0.6 is quieter; values above 1 are extra boost with clipping protection.");
         WeatherEnabled = Config.Bind("Weather", "Enabled", true,
             "Provide current Open-Meteo weather conditions to Lilith.");
         TestNoteOnce = Config.Bind("Notes", "CreateOneTestNote", false,
@@ -252,7 +255,7 @@ public sealed class Plugin : BasePlugin
         VoiceInputMaxSeconds = Config.Bind("VoiceInput", "MaxRecordingSeconds", 60,
             "Maximum duration of one push-to-talk recording (5-90 seconds).");
         VoiceInputDeviceName = Config.Bind("VoiceInput", "DeviceName", string.Empty,
-            "Exact Unity microphone device name. Leave empty to use the Windows default input device.");
+            "Capture device name or substring. Leave empty to pick a real microphone, skipping virtual devices such as SteelSeries Sonar.");
         TextInputKey = Config.Bind("Input", "TextChatKey", KeyCode.F7,
             "Key used to open or close the AI text input bubble. This can also be changed in the in-game settings.");
         VoiceInputKey = Config.Bind("Input", "PushToTalkKey", KeyCode.F6,
@@ -266,6 +269,7 @@ public sealed class Plugin : BasePlugin
         MigrateKnownMojibakeDefaults();
         DialogueManagerUpdatePatch.LoadPersonaOverlay();
         DialogueManagerUpdatePatch.LoadMemory();
+        DialogueManagerUpdatePatch.LoadWatchTogether();
         DialogueManagerUpdatePatch.LoadAiNoteState();
         DialogueManagerUpdatePatch.EnsureApplicationLauncherFile();
         DialogueManagerUpdatePatch.LogOfficialApplicationCategories();
@@ -435,6 +439,8 @@ internal static class DialogueManagerUpdatePatch
     private static readonly List<ChatTurn> RecentConversation = new();
     private static readonly string MemoryDirectory = Path.Combine(Paths.BepInExRootPath, "data", "LilithTextInjector");
     private static readonly string MemoryPath = Path.Combine(MemoryDirectory, "memory.json");
+    private static readonly string WatchTogetherPath = Path.Combine(MemoryDirectory, "watch-together.json");
+    private static readonly string WatchSubtitlesDirectory = Path.Combine(MemoryDirectory, "watch-subtitles");
     private static readonly string AiNoteStatePath = Path.Combine(MemoryDirectory, "ai-note-state.json");
     private static readonly string ApplicationLauncherPath = Path.Combine(MemoryDirectory, "applications.json");
     private static readonly object WindowsStartAppsLock = new();
@@ -523,8 +529,9 @@ internal static class DialogueManagerUpdatePatch
     private static bool _microphoneRecording;
     private static float _microphoneStartedAt;
     private static WasapiCapture? _wasapiCapture;
-    private static MemoryStream? _wasapiStream;
-    private static WaveFileWriter? _wasapiWriter;
+    private static MMDeviceEnumerator? _wasapiEnumerator;
+    private static MMDevice? _wasapiDevice;
+    private static readonly List<float> VoiceCaptureSamples = new();
     private static readonly object WasapiLock = new();
     private static readonly ConcurrentQueue<byte[]> ParaformerAudioChunks = new();
     private static Task<string>? _paraformerSessionTask;
@@ -2654,12 +2661,13 @@ internal static class DialogueManagerUpdatePatch
             try
             {
                 var maxSeconds = Math.Clamp(Plugin.VoiceInputMaxSeconds.Value, 5, 90);
-                string deviceName;
-                using (var enumerator = new MMDeviceEnumerator())
-                    deviceName = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console).FriendlyName;
-                _wasapiCapture = new WasapiCapture();
-                _wasapiStream = new MemoryStream();
-                _wasapiWriter = new WaveFileWriter(_wasapiStream, _wasapiCapture.WaveFormat);
+                _wasapiEnumerator = new MMDeviceEnumerator();
+                _wasapiDevice = ResolveCaptureDevice(_wasapiEnumerator, out var catalog);
+                if (_wasapiDevice == null)
+                    throw new InvalidOperationException("No active Windows capture device was found.");
+                lock (WasapiLock)
+                    VoiceCaptureSamples.Clear();
+                _wasapiCapture = new WasapiCapture(_wasapiDevice);
                 _voiceCaptureFormat = _wasapiCapture.WaveFormat;
                 if (string.Equals(activeVoiceProvider, "Qwen", StringComparison.Ordinal) && UseParaformerRealtime())
                     StartParaformerRealtimeSession();
@@ -2668,7 +2676,7 @@ internal static class DialogueManagerUpdatePatch
                 _microphoneRecording = true;
                 _microphoneStartedAt = Time.unscaledTime;
                 manager.ForceSay(ApiKeyText("正在聽……", "正在听……", "聞いているよ……", "Listening…"), string.Empty, maxSeconds + 2f);
-                Plugin.PluginLog.LogInfo($"F6 WASAPI recording started with Windows default input '{deviceName}' ({_wasapiCapture.WaveFormat}).");
+                Plugin.PluginLog.LogInfo($"F6 WASAPI recording started with '{_wasapiDevice.FriendlyName}' ({_wasapiCapture.WaveFormat}). Capture devices: {catalog}");
             }
             catch (Exception exception)
             {
@@ -2690,30 +2698,32 @@ internal static class DialogueManagerUpdatePatch
         _microphoneRecording = false;
         try
         {
-            if (_wasapiCapture == null || _wasapiStream == null || _wasapiWriter == null)
+            if (_wasapiCapture == null)
                 return;
             _wasapiCapture.StopRecording();
             _wasapiCapture.DataAvailable -= OnWasapiDataAvailable;
-            byte[] wav;
+            float[] captured;
+            var sourceRate = _voiceCaptureFormat != null ? Math.Max(8000, _voiceCaptureFormat.SampleRate) : 48000;
             lock (WasapiLock)
             {
-                _wasapiWriter.Flush();
-                _wasapiWriter.Dispose();
-                _wasapiWriter = null;
-                wav = _wasapiStream.ToArray();
+                captured = VoiceCaptureSamples.ToArray();
+                VoiceCaptureSamples.Clear();
             }
-            _wasapiCapture.Dispose();
+            try { _wasapiCapture.Dispose(); } catch { }
             _wasapiCapture = null;
-            _wasapiStream.Dispose();
-            _wasapiStream = null;
-            if (wav.Length < 2048)
+            try { _wasapiDevice?.Dispose(); } catch { }
+            _wasapiDevice = null;
+            try { _wasapiEnumerator?.Dispose(); } catch { }
+            _wasapiEnumerator = null;
+            _voiceCaptureFormat = null;
+            if (captured.Length < 1600)
             {
                 PendingTranscriptionErrors.Enqueue(ApiKeyText("剛才沒有收到聲音，再試一次吧。", "刚才没有收到声音，再试一次吧。", "今の声は届かなかったみたい。もう一度試してみて。", "I didn't receive that audio. Please try again."));
                 return;
             }
             var elapsed = Math.Max(0f, Time.unscaledTime - _microphoneStartedAt);
             var qwenVoiceInput = string.Equals(NormalizeAiProvider(Plugin.AiProvider.Value), "Qwen", StringComparison.Ordinal);
-            var prepared = NormalizeVoiceWav(wav, qwenVoiceInput ? 16000 : 24000);
+            var prepared = PrepareVoiceSamples(captured, sourceRate, qwenVoiceInput ? 16000 : 24000);
             if (elapsed < 0.3f || (prepared.Measured && prepared.Peak < 0.0005f && prepared.Rms < 0.00005d))
             {
                 PendingTranscriptionErrors.Enqueue(ApiKeyText(
@@ -2721,7 +2731,7 @@ internal static class DialogueManagerUpdatePatch
                     "刚才没有收到声音，再试一次吧。",
                     "今の録音には声が入っていなかったみたい。もう一度試してみて。",
                     "That recording did not contain audible speech. Please try again."));
-                Plugin.PluginLog.LogInfo($"Skipped silent voice transcription locally (elapsed={elapsed:F1}s, RMS={prepared.Rms:F6}, peak={prepared.Peak:F6}).");
+                Plugin.PluginLog.LogInfo($"Skipped silent voice transcription locally (elapsed={elapsed:F1}s, RMS={prepared.Rms:F6}, peak={prepared.Peak:F6}, samples={captured.Length}). Set VoiceInput.DeviceName if the wrong microphone was used.");
                 CancelParaformerRealtimeSession();
                 return;
             }
@@ -2735,7 +2745,7 @@ internal static class DialogueManagerUpdatePatch
             {
                 _ = RequestTranscriptionAsync(prepared.Wav, GetVoiceInputLanguageInstruction());
             }
-            Plugin.PluginLog.LogInfo($"F6 WASAPI recording stopped after {elapsed:F1}s{(reachedLimit ? " (time limit reached)" : string.Empty)}; normalized {wav.Length} to {prepared.Wav.Length} WAV bytes for transcription.");
+            Plugin.PluginLog.LogInfo($"F6 WASAPI recording stopped after {elapsed:F1}s{(reachedLimit ? " (time limit reached)" : string.Empty)}; {captured.Length} samples -> {prepared.Wav.Length} WAV bytes for transcription.");
         }
         catch (Exception exception)
         {
@@ -2747,11 +2757,15 @@ internal static class DialogueManagerUpdatePatch
 
     private static void OnWasapiDataAvailable(object? sender, WaveInEventArgs args)
     {
-        lock (WasapiLock)
+        if (args.BytesRecorded <= 0 || _voiceCaptureFormat == null)
+            return;
+        var samples = ConvertCaptureChunkToMonoFloat(args.Buffer, args.BytesRecorded, _voiceCaptureFormat);
+        if (samples.Length > 0)
         {
-            _wasapiWriter?.Write(args.Buffer, 0, args.BytesRecorded);
+            lock (WasapiLock)
+                VoiceCaptureSamples.AddRange(samples);
         }
-        if (_paraformerSessionTask != null && _voiceCaptureFormat != null && args.BytesRecorded > 0)
+        if (_paraformerSessionTask != null)
         {
             var pcm = ConvertCaptureChunkToMonoPcm16(args.Buffer, args.BytesRecorded, _voiceCaptureFormat);
             if (pcm.Length > 0)
@@ -2763,16 +2777,63 @@ internal static class DialogueManagerUpdatePatch
     {
         try { _wasapiCapture?.StopRecording(); } catch { }
         try { _wasapiCapture?.Dispose(); } catch { }
+        try { _wasapiDevice?.Dispose(); } catch { }
+        try { _wasapiEnumerator?.Dispose(); } catch { }
         lock (WasapiLock)
-        {
-            try { _wasapiWriter?.Dispose(); } catch { }
-            try { _wasapiStream?.Dispose(); } catch { }
-            _wasapiWriter = null;
-            _wasapiStream = null;
-        }
+            VoiceCaptureSamples.Clear();
         _wasapiCapture = null;
+        _wasapiDevice = null;
+        _wasapiEnumerator = null;
         _voiceCaptureFormat = null;
         CancelParaformerRealtimeSession();
+    }
+
+    private static bool IsVirtualCaptureDevice(string name)
+    {
+        return name.IndexOf("Virtual Audio Device", StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Sonar - Microphone", StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("VB-Audio", StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("CABLE Input", StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("CABLE Output", StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Steam Streaming Microphone", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static MMDevice? ResolveCaptureDevice(MMDeviceEnumerator enumerator, out string catalog)
+    {
+        var active = new List<MMDevice>();
+        foreach (var device in enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active))
+            active.Add(device);
+        catalog = active.Count == 0
+            ? "(none)"
+            : string.Join("; ", active.ConvertAll(device => device.FriendlyName));
+
+        var wanted = Plugin.VoiceInputDeviceName.Value.Trim();
+        if (wanted.Length > 0)
+        {
+            var match = active.Find(device => device.FriendlyName.IndexOf(wanted, StringComparison.OrdinalIgnoreCase) >= 0);
+            if (match != null)
+                return match;
+            Plugin.PluginLog.LogWarning($"VoiceInput DeviceName '{wanted}' was not found. Available: {catalog}");
+        }
+
+        MMDevice? communications = null;
+        MMDevice? console = null;
+        try { communications = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications); }
+        catch { }
+        try { console = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Multimedia); }
+        catch { }
+        try { console ??= enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console); }
+        catch { }
+
+        bool Usable(MMDevice? device) => device != null && !IsVirtualCaptureDevice(device.FriendlyName);
+        if (Usable(communications))
+            return communications;
+        if (Usable(console))
+            return console;
+        var physical = active.Find(device => !IsVirtualCaptureDevice(device.FriendlyName));
+        if (physical != null)
+            return physical;
+        return communications ?? console ?? (active.Count > 0 ? active[0] : null);
     }
 
     private static void StartParaformerRealtimeSession()
@@ -2986,6 +3047,45 @@ internal static class DialogueManagerUpdatePatch
         }
     }
 
+    private static float[] ConvertCaptureChunkToMonoFloat(byte[] buffer, int count, WaveFormat format)
+    {
+        var channels = Math.Max(1, format.Channels);
+        var bytesPerSample = Math.Max(1, format.BitsPerSample / 8);
+        var frameSize = Math.Max(1, format.BlockAlign);
+        var frames = count / frameSize;
+        if (frames <= 0)
+            return Array.Empty<float>();
+        var samples = new float[frames];
+        for (var frame = 0; frame < frames; frame++)
+        {
+            double mixed = 0d;
+            for (var channel = 0; channel < channels; channel++)
+                mixed += ReadCaptureSample(buffer, frame * frameSize + channel * bytesPerSample, format, bytesPerSample);
+            samples[frame] = (float)(mixed / channels);
+        }
+        return samples;
+    }
+
+    private static float ReadCaptureSample(byte[] buffer, int offset, WaveFormat format, int bytesPerSample)
+    {
+        if (offset < 0 || offset + bytesPerSample > buffer.Length)
+            return 0f;
+        if (format.Encoding == WaveFormatEncoding.IeeeFloat && bytesPerSample == 4)
+            return BitConverter.ToSingle(buffer, offset);
+        if (bytesPerSample == 2)
+            return BitConverter.ToInt16(buffer, offset) / 32768f;
+        if (bytesPerSample == 3)
+        {
+            var value = buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16);
+            if ((value & 0x800000) != 0)
+                value |= unchecked((int)0xFF000000);
+            return value / 8388608f;
+        }
+        if (bytesPerSample == 4)
+            return BitConverter.ToInt32(buffer, offset) / 2147483648f;
+        return 0f;
+    }
+
     private static byte[] ConvertCaptureChunkToMonoPcm16(byte[] buffer, int count, WaveFormat format)
     {
         var channels = Math.Max(1, format.Channels);
@@ -2999,23 +3099,7 @@ internal static class DialogueManagerUpdatePatch
             double mixed = 0d;
             for (var channel = 0; channel < channels; channel++)
             {
-                var offset = frame * frameSize + channel * bytesPerSample;
-                float sample;
-                if (format.Encoding == WaveFormatEncoding.IeeeFloat && bytesPerSample == 4)
-                    sample = BitConverter.ToSingle(buffer, offset);
-                else if (bytesPerSample == 2)
-                    sample = BitConverter.ToInt16(buffer, offset) / 32768f;
-                else if (bytesPerSample == 3)
-                {
-                    var value = buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16);
-                    if ((value & 0x800000) != 0) value |= unchecked((int)0xFF000000);
-                    sample = value / 8388608f;
-                }
-                else if (bytesPerSample == 4)
-                    sample = BitConverter.ToInt32(buffer, offset) / 2147483648f;
-                else
-                    sample = 0f;
-                mixed += sample;
+                mixed += ReadCaptureSample(buffer, frame * frameSize + channel * bytesPerSample, format, bytesPerSample);
             }
             var mono = (float)(mixed / channels);
             _paraformerResampleAccumulator += 16000d;
@@ -3050,86 +3134,61 @@ internal static class DialogueManagerUpdatePatch
         return stream.ToArray();
     }
 
-    private static (byte[] Wav, double Rms, float Peak, bool Measured) NormalizeVoiceWav(byte[] wav, int preferredSampleRate)
+    private static (byte[] Wav, double Rms, float Peak, bool Measured) PrepareVoiceSamples(float[] mono, int sourceRate, int preferredSampleRate)
     {
-        try
+        if (mono.Length == 0)
+            return (Array.Empty<byte>(), 0d, 0f, true);
+        double sumSquares = 0;
+        float peak = 0;
+        for (var i = 0; i < mono.Length; i++)
         {
-            using var input = new MemoryStream(wav, false);
-            using var reader = new WaveFileReader(input);
-            var provider = reader.ToSampleProvider();
-            var channels = Math.Max(1, provider.WaveFormat.Channels);
-            var sourceRate = Math.Max(8000, provider.WaveFormat.SampleRate);
-            var estimatedSamples = (int)Math.Min(int.MaxValue, Math.Max(4096L,
-                reader.Length / Math.Max(1, reader.WaveFormat.BlockAlign) * channels));
-            var samples = new float[estimatedSamples];
-            var count = 0;
-            while (count < samples.Length)
-            {
-                var read = provider.Read(samples, count, samples.Length - count);
-                if (read <= 0)
-                    break;
-                count += read;
-            }
-            if (count < channels)
-                return (wav, 0d, 0f, false);
-
-            var frames = count / channels;
-            var mono = new float[frames];
-            double sumSquares = 0;
-            float peak = 0;
-            for (var frame = 0; frame < frames; frame++)
-            {
-                double sum = 0;
-                for (var channel = 0; channel < channels; channel++)
-                    sum += samples[frame * channels + channel];
-                var value = (float)(sum / channels);
-                mono[frame] = value;
-                sumSquares += value * value;
-                peak = Math.Max(peak, Math.Abs(value));
-            }
-
-            var rms = Math.Sqrt(sumSquares / Math.Max(1, frames));
-            var gain = peak > 0.001f ? Math.Min(3f, 0.88f / peak) : 1f;
-            if (gain > 1.05f)
-                for (var i = 0; i < mono.Length; i++)
-                    mono[i] = Math.Clamp(mono[i] * gain, -1f, 1f);
-
-            var targetRate = Math.Min(Math.Clamp(preferredSampleRate, 8000, 48000), sourceRate);
-            float[] output;
-            if (targetRate == sourceRate)
-            {
-                output = mono;
-            }
-            else
-            {
-                var outputFrames = Math.Max(1, (int)Math.Round(frames * (double)targetRate / sourceRate));
-                output = new float[outputFrames];
-                var ratio = sourceRate / (double)targetRate;
-                for (var i = 0; i < outputFrames; i++)
-                {
-                    var position = i * ratio;
-                    var left = Math.Min(frames - 1, (int)position);
-                    var right = Math.Min(frames - 1, left + 1);
-                    var fraction = (float)(position - left);
-                    output[i] = mono[left] + (mono[right] - mono[left]) * fraction;
-                }
-            }
-
-            Plugin.PluginLog.LogInfo($"Voice audio prepared as mono PCM16 {targetRate}Hz (source {sourceRate}Hz/{channels}ch, RMS {rms:F4}, peak {peak:F4}, gain {gain:F2}x).");
-            return (EncodePcm16Wav(output, 1, targetRate), rms, peak, true);
+            var value = mono[i];
+            sumSquares += value * (double)value;
+            peak = Math.Max(peak, Math.Abs(value));
         }
-        catch (Exception exception)
+        var rms = Math.Sqrt(sumSquares / mono.Length);
+        var gain = peak > 0.001f ? Math.Min(8f, 0.88f / peak) : 1f;
+        var boosted = mono;
+        if (gain > 1.05f)
         {
-            Plugin.PluginLog.LogWarning($"Voice audio normalization failed; sending original recording: {exception.Message}");
-            return (wav, 0d, 0f, false);
+            boosted = new float[mono.Length];
+            for (var i = 0; i < mono.Length; i++)
+                boosted[i] = Math.Clamp(mono[i] * gain, -1f, 1f);
         }
+
+        var safeSource = Math.Max(8000, sourceRate);
+        var targetRate = Math.Clamp(preferredSampleRate, 8000, 48000);
+        float[] output;
+        if (targetRate == safeSource)
+        {
+            output = boosted;
+        }
+        else
+        {
+            var outputFrames = Math.Max(1, (int)Math.Round(mono.Length * (double)targetRate / safeSource));
+            output = new float[outputFrames];
+            var ratio = safeSource / (double)targetRate;
+            for (var i = 0; i < outputFrames; i++)
+            {
+                var position = i * ratio;
+                var left = Math.Min(mono.Length - 1, (int)position);
+                var right = Math.Min(mono.Length - 1, left + 1);
+                var fraction = (float)(position - left);
+                output[i] = boosted[left] + (boosted[right] - boosted[left]) * fraction;
+            }
+        }
+
+        Plugin.PluginLog.LogInfo($"Voice audio prepared as mono PCM16 {targetRate}Hz (source {safeSource}Hz/1ch, RMS {rms:F4}, peak {peak:F4}, gain {gain:F2}x, samples {mono.Length}).");
+        return (EncodePcm16Wav(output, 1, targetRate), rms, peak, true);
     }
 
     private static string GetVoiceInputLanguageInstruction()
     {
+        if (IsPortugueseInterface())
+            return "The companion chat language is Brazilian Portuguese. Transcribe the speech in Brazilian Portuguese.";
         try
         {
-            var language = GameSetting.Language ?? string.Empty;
+            var language = GetActiveReplyLanguage();
             if (language.StartsWith("ja", StringComparison.OrdinalIgnoreCase))
                 return "The game interface language is Japanese. Transcribe as natural Japanese using Japanese script.";
             if (language.StartsWith("zh-CN", StringComparison.OrdinalIgnoreCase)
@@ -3143,7 +3202,7 @@ internal static class DialogueManagerUpdatePatch
         catch
         {
         }
-        return "Detect whether the speech is Traditional Chinese, Japanese, or English, and transcribe it in the spoken language.";
+        return "Detect whether the speech is Brazilian Portuguese, Traditional Chinese, Japanese, or English, and transcribe it in the spoken language.";
     }
 
     private static async Task RequestTranscriptionAsync(byte[] wav, string languageInstruction)
@@ -3276,12 +3335,15 @@ internal static class DialogueManagerUpdatePatch
 
     private static string GetVoiceInputLanguageCode()
     {
+        if (IsPortugueseInterface())
+            return "pt";
         try
         {
-            var language = GameSetting.Language ?? string.Empty;
+            var language = GetActiveReplyLanguage();
             if (language.StartsWith("ja", StringComparison.OrdinalIgnoreCase)) return "ja";
             if (language.StartsWith("zh", StringComparison.OrdinalIgnoreCase)) return "zh";
             if (language.StartsWith("en", StringComparison.OrdinalIgnoreCase)) return "en";
+            if (language.StartsWith("pt", StringComparison.OrdinalIgnoreCase)) return "pt";
         }
         catch
         {
@@ -4724,7 +4786,8 @@ internal static class DialogueManagerUpdatePatch
             var nameContext = BuildPlayerNameContext(userText, playerName);
             var timeContext = BuildLocalTimeContext();
             var weatherContext = await BuildWeatherContextAsync().ConfigureAwait(false);
-            var useGoogleSearch = ShouldUseGeminiGoogleSearch(userText);
+            NoteWatchTogether(userText);
+            var useGoogleSearch = ShouldUseGeminiGoogleSearch(userText) || WatchTogether.ShouldSearch(userText);
             var activeProvider = NormalizeAiProvider(Plugin.AiProvider.Value);
             var overlay = _personaOverlay;
             var systemInstruction = overlay.ResolvePersona(Plugin.PersonaPrompt.Value)
@@ -4740,6 +4803,7 @@ internal static class DialogueManagerUpdatePatch
                 systemInstruction += "\nThis question explicitly requests a lookup or depends on current facts. You must use the available web-search tool before answering, answer concisely in character, and never invent facts absent from the results.";
             else if (string.Equals(activeProvider, "Qwen", StringComparison.Ordinal))
                 systemInstruction += "\nA web-search tool is available. Use it whenever the answer materially depends on recent or changeable facts such as news, current people or policies, prices, weather, schedules, software/model versions, service availability, or product features. Do not search for casual conversation, roleplay, personal advice, or stable facts.";
+            systemInstruction += WatchTogether.BuildPrompt();
             var desktopToolsEnabled = Plugin.AdvancedComputerActionsEnabled.Value;
             if (desktopToolsEnabled
                 && (string.Equals(activeProvider, "Gemini", StringComparison.Ordinal)
@@ -5244,8 +5308,31 @@ internal static class DialogueManagerUpdatePatch
             return false;
 
         return Regex.IsMatch(userText,
-            "(?:幫我|帮我)?(?:查查|查一下|查詢|查询|搜尋|搜索|上網查|联网查)|(?:最新|新聞|新闻|即時|即时|現任|现任|今天|今日|今年)|(?:目前|最近|新版|更新後).*(?:消息|資訊|信息|情報|進度|进度|價格|价格|費用|费用|比賽|比赛|天氣|天气|版本|模型|功能|政策|規定|规定|支援|支持|是誰|是谁)|(?:調べて|検索して|ネットで調べて|最新|ニュース|今日)|(?:現在|最近).*(?:ニュース|価格|天気|バージョン|モデル|機能|対応|予定)|(?:look\\s*(?:it|this)?\\s*up|search(?:\\s+the)?\\s+web|google\\s+it|find\\s+online|latest|current|today|recent)",
+            "(?:幫我|帮我)?(?:查查|查一下|查詢|查询|搜尋|搜索|上網查|联网查)|(?:最新|新聞|新闻|即時|即时|現任|现任|今天|今日|今年)|(?:目前|最近|新版|更新後).*(?:消息|資訊|信息|情報|進度|进度|價格|价格|費用|费用|比賽|比赛|天氣|天气|版本|模型|功能|政策|規定|规定|支援|支持|是誰|是谁)|(?:調べて|検索して|ネットで調べて|最新|ニュース|今日)|(?:現在|最近).*(?:ニュース|価格|天気|バージョン|モデル|機能|対応|予定)|(?:look\\s*(?:it|this)?\\s*up|search(?:\\s+the)?\\s+web|google\\s+it|find\\s+online|latest|current|today|recent)|(?:sinopse|synopsis|recap|reviews?|discuss[aã]o)",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
+    internal static void LoadWatchTogether()
+    {
+        try { Directory.CreateDirectory(WatchSubtitlesDirectory); } catch { }
+        WatchTogether.SubtitlesDirectory = WatchSubtitlesDirectory;
+        WatchTogether.Load(WatchTogetherPath);
+        if (WatchTogether.IsActive && WatchTogether.Active != null)
+            Plugin.PluginLog.LogInfo($"Watch-together session restored: {WatchTogether.FormatLabel(WatchTogether.Active)}.");
+    }
+
+    private static void NoteWatchTogether(string userText)
+    {
+        List<string> recent;
+        lock (MemoryLock)
+            recent = RecentConversation.ConvertAll(turn => turn.Text);
+        var previous = WatchTogether.Active;
+        var state = WatchTogether.Observe(userText, recent);
+        WatchTogether.Save(WatchTogetherPath);
+        if (state == null && previous != null)
+            Plugin.PluginLog.LogInfo("Watch-together session ended.");
+        else if (state != null && (previous == null || previous.Episode != state.Episode || previous.Title != state.Title || previous.Platform != state.Platform))
+            Plugin.PluginLog.LogInfo($"Watch-together session: {WatchTogether.FormatLabel(state)}.");
     }
 
     private static async Task RequestQwenResponsesAsync(string systemInstruction, string userText,
@@ -5663,6 +5750,14 @@ internal static class DialogueManagerUpdatePatch
         _personaOverlay = PersonaOverlay.Load(directory);
         if (_personaOverlay.HasAny)
             Plugin.PluginLog.LogInfo($"Loaded a local persona overlay from {directory}.");
+        var dataRoot = Path.GetDirectoryName(directory);
+        var abbreviationPath = string.IsNullOrEmpty(dataRoot)
+            ? string.Empty
+            : Path.Combine(dataRoot, "abreviations.json");
+        if (SpeechTextSanitizer.TryLoadAbbreviations(abbreviationPath, out var count, out var error))
+            Plugin.PluginLog.LogInfo($"Loaded {count} speech abbreviations from {abbreviationPath}.");
+        else if (!string.IsNullOrEmpty(error))
+            Plugin.PluginLog.LogWarning($"Could not load speech abbreviations from {abbreviationPath}: {error}");
     }
 
     private static PoseContext CapturePoseContext()
@@ -5908,9 +6003,14 @@ internal static class DialogueManagerUpdatePatch
         try
         {
             var useJapanese = japaneseVoiceMode ?? IsJapaneseVoiceMode();
+            var speechMood = SpeechMood.Resolve(text, poseStyle.ToString());
             var speechText = PrepareTextForSpeech(text);
             if (speechText.Length == 0)
+            {
+                if (!string.IsNullOrWhiteSpace(text))
+                    Plugin.PluginLog.LogInfo("Skipped TTS because the reply was only emojis, laughter, or markup.");
                 return;
+            }
             var languages = AiVoiceLanguagePolicy.Resolve(
                 useJapanese, IsEnglishInterface(), IsPortugueseInterface(), speechText);
             useJapanese = languages.UseJapaneseService;
@@ -5932,9 +6032,10 @@ internal static class DialogueManagerUpdatePatch
                     text = speechText,
                     language = AiVoiceLanguagePolicy.Portuguese,
                     speaker_wav = portugueseRefs,
+                    style = speechMood,
                     media_type = "wav"
                 });
-                Plugin.PluginLog.LogInfo("Using XTTS Portuguese TTS cloned from local reference clips.");
+                Plugin.PluginLog.LogInfo($"Using XTTS Portuguese TTS cloned from local reference clips (style {speechMood}).");
                 maximumAttempts = IsLocalVoiceEndpoint(endpoint) && Plugin.VoiceAutoStartLocalService.Value ? 12 : 1;
             }
             else
@@ -6046,14 +6147,9 @@ internal static class DialogueManagerUpdatePatch
 
     private static string PrepareTextForSpeech(string text)
     {
-        var cleaned = Regex.Replace(text, @"\[([^\]]+)\]\(https?://[^\s\)]+\)", "$1", RegexOptions.IgnoreCase);
-        cleaned = Regex.Replace(cleaned, @"https?://\S+", string.Empty, RegexOptions.IgnoreCase);
-        cleaned = Regex.Replace(cleaned, @"(?:來源|资料来源|資料來源|出典|Sources?)\s*[:：]\s*$", string.Empty,
-            RegexOptions.IgnoreCase | RegexOptions.Multiline);
-        cleaned = Regex.Replace(cleaned, @"[ \t]+", " ");
-        cleaned = Regex.Replace(cleaned, @"\n{3,}", "\n\n").Trim();
+        var cleaned = SpeechTextSanitizer.Prepare(text);
         if (!string.Equals(cleaned, text, StringComparison.Ordinal))
-            Plugin.PluginLog.LogInfo($"Removed web citation markup before TTS ({text.Length} -> {cleaned.Length} chars).");
+            Plugin.PluginLog.LogInfo($"Removed URLs, emojis, or laughter before TTS ({text.Length} -> {cleaned.Length} chars).");
         return cleaned;
     }
 
@@ -6066,8 +6162,11 @@ internal static class DialogueManagerUpdatePatch
 
     private static AudioClip PlayWav(byte[] wav, string label, float padLeadInSeconds = 0f)
     {
-        var clip = CreateAudioClipFromWav(wav, padLeadInSeconds);
+        var clip = CreateAudioClipFromWav(wav, padLeadInSeconds, boost: true);
         ProtectAiSpeech(clip.length + 0.08f);
+        var manager = AudioManager.instance;
+        if (manager != null && manager.source_Voice != null)
+            manager.source_Voice.volume = 1f;
         AudioManager.PlayVoice(clip, false, true);
         Plugin.PluginLog.LogInfo($"Playing {label} ({wav.Length} bytes, {clip.length:0.00}s).");
         return clip;
@@ -6208,7 +6307,7 @@ internal static class DialogueManagerUpdatePatch
         }
     }
 
-    private static AudioClip CreateAudioClipFromWav(byte[] wav, float padLeadInSeconds = 0f)
+    private static AudioClip CreateAudioClipFromWav(byte[] wav, float padLeadInSeconds = 0f, bool boost = false)
     {
         if (wav.Length < 44 || Encoding.ASCII.GetString(wav, 0, 4) != "RIFF" || Encoding.ASCII.GetString(wav, 8, 4) != "WAVE")
             throw new InvalidDataException("TTS response is not a WAV file.");
@@ -6270,11 +6369,51 @@ internal static class DialogueManagerUpdatePatch
             samples = padded;
         }
 
+        if (boost)
+            BoostVoiceSamples(samples);
+
         var frameCount = samples.Length / channels;
         var clip = AudioClip.Create("LilithAiVoice", frameCount, channels, sampleRate, false);
         if (!clip.SetData(samples, 0))
             throw new InvalidOperationException("Unity rejected generated audio samples.");
         return clip;
+    }
+
+    private static void BoostVoiceSamples(float[] samples)
+    {
+        var gain = 1f;
+        try
+        {
+            gain = Plugin.VoicePlaybackGain.Value;
+        }
+        catch
+        {
+        }
+        gain = Math.Clamp(gain, 0.2f, 4f);
+        var peak = 0f;
+        for (var i = 0; i < samples.Length; i++)
+        {
+            var magnitude = Math.Abs(samples[i]);
+            if (magnitude > peak)
+                peak = magnitude;
+        }
+        if (peak < 1e-5f)
+            return;
+        var target = Math.Min(0.95f * Math.Max(gain, 1f), 0.98f);
+        var scale = target / peak;
+        if (gain < 1f)
+            scale *= gain;
+        if (Math.Abs(scale - 1f) < 0.02f)
+            return;
+        for (var i = 0; i < samples.Length; i++)
+        {
+            var boosted = samples[i] * scale;
+            if (boosted > 1f)
+                boosted = 1f;
+            else if (boosted < -1f)
+                boosted = -1f;
+            samples[i] = boosted;
+        }
     }
 
     private static string CleanReply(string? reply)
