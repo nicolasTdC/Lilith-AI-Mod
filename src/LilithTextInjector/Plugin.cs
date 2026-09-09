@@ -4849,9 +4849,15 @@ internal static class DialogueManagerUpdatePatch
             {
                 systemInstruction += ScreenLook.PromptFor(userText);
                 if (screenCapture.Success)
+                {
+                    systemInstruction += ScreenLook.ImageAttachedPrompt;
                     Plugin.PluginLog.LogInfo($"Attached a desktop screenshot so Lilith can look ({Path.GetFileName(screenCapture.JpegPath)}).");
+                }
                 else
+                {
+                    systemInstruction += ScreenLook.CaptureFailedPrompt + " Error: " + screenCapture.Error;
                     Plugin.PluginLog.LogWarning($"Screen-look screenshot failed: {screenCapture.Error}");
+                }
             }
             var desktopToolsEnabled = Plugin.AdvancedComputerActionsEnabled.Value;
             if (desktopToolsEnabled
@@ -5062,6 +5068,8 @@ internal static class DialogueManagerUpdatePatch
                         batch.Session.UseGoogleSearch = true;
                     if (!batch.Session.SystemInstruction.Contains(lookPrompt, StringComparison.Ordinal))
                         batch.Session.SystemInstruction += lookPrompt;
+                    if (!batch.Session.SystemInstruction.Contains(ScreenLook.ImageAttachedPrompt, StringComparison.Ordinal))
+                        batch.Session.SystemInstruction += ScreenLook.ImageAttachedPrompt;
                 }
             }
             batch.Session.Contents.Add(new { role = "user", parts = responseParts.ToArray() });
@@ -5649,6 +5657,8 @@ internal static class DialogueManagerUpdatePatch
                         batch.Session.ForceWebSearch = true;
                     if (!batch.Session.SystemInstruction.Contains(lookPrompt, StringComparison.Ordinal))
                         batch.Session.SystemInstruction += lookPrompt;
+                    if (!batch.Session.SystemInstruction.Contains(ScreenLook.ImageAttachedPrompt, StringComparison.Ordinal))
+                        batch.Session.SystemInstruction += ScreenLook.ImageAttachedPrompt;
                     batch.Session.Input.Add(new
                     {
                         role = "user",

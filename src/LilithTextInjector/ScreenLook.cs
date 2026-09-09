@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -20,8 +22,14 @@ internal static class ScreenLook
     internal const string LeaguePrompt =
         "\nLeague champ-select help: A screenshot of the user's desktop is attached. Look at the champion select UI: the user's assigned lane/role, their profile/hover, ally picks and hovers, enemy picks, and bans. Ignore unrelated windows. Then you MUST use web search for the current patch meta for that exact lane versus the visible threats. Suggest one main champion they can still pick and one backup. Stay in character, keep it short, and do not recommend banned or already-taken champions. If the screenshot is not champ select, say so and ask what lane they are on.";
 
+    internal const string ImageAttachedPrompt =
+        "\nA screenshot is attached to this turn. You can see it. Do not say antivirus blocked the print, that the screenshot failed, or that you cannot see the screen.";
+
+    internal const string CaptureFailedPrompt =
+        "\nScreenshot capture failed. Do not mention antivirus unless the error text does. Ask the user to describe what is on screen.";
+
     private static readonly Regex LookCue = new(
-        @"(?i)(?:olha(?:r)?|olhe|v[eê](?:ja)?)\s+(?:isso|isto|aqui|a[ií]|pra\s+(?:mim\s+)?(?:isso|aqui|tela)|a\s+tela|o\s+monitor|nesta|nessa|o\s+que|se\s+voc[eê])|"
+        @"(?i)(?:olha(?:r)?|olhe|v[eê](?:ja)?).{0,24}(?:tela|screen|monitor|isso|isto|aqui)|"
         + @"(?i)(?:consegue(?:m)?\s+ver|ver)\s+(?:a|minha|o|na)\s+(?:tela|ecr[aã]|screen)|"
         + @"(?i)o\s+que\s+(?:tem|t[aá]|est[aá])\s+(?:na|no)\s+(?:tela|ecr[aã]|monitor|screen)|"
         + @"(?i)see\s+my\s+screen|"
@@ -65,52 +73,20 @@ internal static class ScreenLook
     {
         try
         {
-            var pictures = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
-            if (string.IsNullOrWhiteSpace(pictures))
-                pictures = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Pictures");
-            var directory = Path.Combine(pictures, "Lilith Screenshots");
+            var directory = ScreenshotDirectory();
             Directory.CreateDirectory(directory);
             var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             var pngPath = Path.Combine(directory, $"Lilith_{stamp}.png");
-            var jpegPath = Path.Combine(directory, $"Lilith_{stamp}_look.jpg");
-            var pngEscaped = pngPath.Replace("'", "''");
-            var jpegEscaped = jpegPath.Replace("'", "''");
-            var script =
-                "Add-Type -AssemblyName System.Windows.Forms; " +
-                "Add-Type -AssemblyName System.Drawing; " +
-                "$bounds=[System.Windows.Forms.SystemInformation]::VirtualScreen; " +
-                "$bitmap=New-Object System.Drawing.Bitmap($bounds.Width,$bounds.Height); " +
-                "$graphics=[System.Drawing.Graphics]::FromImage($bitmap); " +
-                "$graphics.CopyFromScreen($bounds.Left,$bounds.Top,0,0,$bitmap.Size); " +
-                $"$bitmap.Save('{pngEscaped}',[System.Drawing.Imaging.ImageFormat]::Png); " +
-                "$encoder=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }; " +
-                "$ep=New-Object System.Drawing.Imaging.EncoderParameters(1); " +
-                "$ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,[int64]72); " +
-                $"$bitmap.Save('{jpegEscaped}',$encoder,$ep); " +
-                "$graphics.Dispose(); $bitmap.Dispose();";
-            var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
-            using var process = Process.Start(new ProcessStartInfo("powershell.exe")
-            {
-                Arguments = $"-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {encoded}",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardError = true
-            });
-            if (process == null)
-                return new CaptureResult(false, string.Empty, string.Empty, "The screenshot helper could not be started.");
-            if (!process.WaitForExit(12000))
-            {
-                try { process.Kill(true); } catch { }
-                return new CaptureResult(false, string.Empty, string.Empty, "The screenshot helper timed out.");
-            }
-            var error = process.StandardError.ReadToEnd();
-            if (process.ExitCode != 0 || !File.Exists(pngPath))
-            {
-                return new CaptureResult(false, string.Empty, string.Empty,
-                    string.IsNullOrWhiteSpace(error) ? "No screenshot file was created." : error.Trim());
-            }
 
-            return new CaptureResult(true, pngPath, File.Exists(jpegPath) ? jpegPath : pngPath, string.Empty);
+            if (TryCaptureWithGdi(pngPath, out var gdiError))
+                return new CaptureResult(true, pngPath, pngPath, string.Empty);
+
+            var powershellError = CaptureWithPowerShell(pngPath);
+            if (File.Exists(pngPath) && new FileInfo(pngPath).Length > 0)
+                return new CaptureResult(true, pngPath, pngPath, string.Empty);
+
+            return new CaptureResult(false, string.Empty, string.Empty,
+                FirstError(gdiError, powershellError) ?? "No screenshot file was created.");
         }
         catch (Exception exception)
         {
@@ -140,5 +116,264 @@ internal static class ScreenLook
         {
             return false;
         }
+    }
+
+    private static string ScreenshotDirectory()
+    {
+        var pictures = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
+        if (string.IsNullOrWhiteSpace(pictures))
+            pictures = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Pictures");
+        return Path.Combine(pictures, "Lilith Screenshots");
+    }
+
+    private static string? FirstError(params string?[] errors)
+    {
+        foreach (var error in errors)
+            if (!string.IsNullOrWhiteSpace(error))
+                return error;
+        return null;
+    }
+
+    private static bool TryCaptureWithGdi(string pngPath, out string error)
+    {
+        error = string.Empty;
+        var left = GetSystemMetrics(SmXvirtualscreen);
+        var top = GetSystemMetrics(SmYvirtualscreen);
+        var width = GetSystemMetrics(SmCxvirtualscreen);
+        var height = GetSystemMetrics(SmCyvirtualscreen);
+        if (width <= 0 || height <= 0)
+        {
+            error = $"Virtual screen size was invalid ({width}x{height}).";
+            return false;
+        }
+
+        var screenDc = GetDC(IntPtr.Zero);
+        if (screenDc == IntPtr.Zero)
+        {
+            error = "GetDC failed.";
+            return false;
+        }
+
+        var memoryDc = CreateCompatibleDC(screenDc);
+        var bitmap = CreateCompatibleBitmap(screenDc, width, height);
+        var previous = SelectObject(memoryDc, bitmap);
+        try
+        {
+            if (!BitBlt(memoryDc, 0, 0, width, height, screenDc, left, top, Srccopy))
+            {
+                error = "BitBlt failed.";
+                return false;
+            }
+
+            var pixels = new byte[width * height * 4];
+            var info = new BitmapInfo();
+            info.Header.Size = (uint)Marshal.SizeOf<BitmapInfoHeader>();
+            info.Header.Width = width;
+            info.Header.Height = -height;
+            info.Header.Planes = 1;
+            info.Header.BitCount = 32;
+            info.Header.Compression = 0;
+            if (GetDIBits(memoryDc, bitmap, 0, (uint)height, pixels, ref info, 0) == 0)
+            {
+                error = "GetDIBits failed.";
+                return false;
+            }
+
+            var png = EncodePng(pixels, width, height, maxWidth: 1280);
+            File.WriteAllBytes(pngPath, png);
+            return File.Exists(pngPath) && new FileInfo(pngPath).Length > 0;
+        }
+        finally
+        {
+            SelectObject(memoryDc, previous);
+            if (bitmap != IntPtr.Zero) DeleteObject(bitmap);
+            if (memoryDc != IntPtr.Zero) DeleteDC(memoryDc);
+            ReleaseDC(IntPtr.Zero, screenDc);
+        }
+    }
+
+    private static string CaptureWithPowerShell(string pngPath)
+    {
+        var scriptPath = Path.Combine(Path.GetTempPath(), "lilith-screen-look.ps1");
+        var pngEscaped = pngPath.Replace("'", "''");
+        File.WriteAllText(scriptPath,
+            "Add-Type -AssemblyName System.Windows.Forms; " +
+            "Add-Type -AssemblyName System.Drawing; " +
+            "$bounds=[System.Windows.Forms.SystemInformation]::VirtualScreen; " +
+            "$bitmap=New-Object System.Drawing.Bitmap($bounds.Width,$bounds.Height); " +
+            "$graphics=[System.Drawing.Graphics]::FromImage($bitmap); " +
+            "$graphics.CopyFromScreen($bounds.Left,$bounds.Top,0,0,$bitmap.Size); " +
+            $"$bitmap.Save('{pngEscaped}',[System.Drawing.Imaging.ImageFormat]::Png); " +
+            "$graphics.Dispose(); $bitmap.Dispose();",
+            Encoding.UTF8);
+        using var process = Process.Start(new ProcessStartInfo("powershell.exe")
+        {
+            Arguments = $"-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{scriptPath}\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardError = true
+        });
+        if (process == null)
+            return "The screenshot helper could not be started.";
+        if (!process.WaitForExit(12000))
+        {
+            try { process.Kill(true); } catch { }
+            return "The screenshot helper timed out.";
+        }
+        var error = process.StandardError.ReadToEnd();
+        return process.ExitCode == 0 ? string.Empty : (string.IsNullOrWhiteSpace(error) ? $"PowerShell exit {process.ExitCode}." : error.Trim());
+    }
+
+    private static byte[] EncodePng(byte[] bgra, int width, int height, int maxWidth)
+    {
+        var scale = 1;
+        while (width / scale > maxWidth)
+            scale *= 2;
+        var outWidth = Math.Max(1, width / scale);
+        var outHeight = Math.Max(1, height / scale);
+        var stride = outWidth * 3 + 1;
+        var raw = new byte[stride * outHeight];
+        for (var y = 0; y < outHeight; y++)
+        {
+            var dest = y * stride;
+            raw[dest] = 0;
+            var srcY = Math.Min(height - 1, y * scale);
+            for (var x = 0; x < outWidth; x++)
+            {
+                var srcX = Math.Min(width - 1, x * scale);
+                var src = (srcY * width + srcX) * 4;
+                var i = dest + 1 + x * 3;
+                raw[i] = bgra[src + 2];
+                raw[i + 1] = bgra[src + 1];
+                raw[i + 2] = bgra[src];
+            }
+        }
+
+        using var idat = new MemoryStream();
+        idat.WriteByte(0x78);
+        idat.WriteByte(0x01);
+        using (var deflate = new DeflateStream(idat, CompressionLevel.Fastest, true))
+            deflate.Write(raw, 0, raw.Length);
+        WriteAdler32(idat, raw);
+
+        using var png = new MemoryStream();
+        png.Write(PngSignature, 0, PngSignature.Length);
+        WriteChunk(png, "IHDR", Ihdr(outWidth, outHeight));
+        WriteChunk(png, "IDAT", idat.ToArray());
+        WriteChunk(png, "IEND", Array.Empty<byte>());
+        return png.ToArray();
+    }
+
+    private static byte[] Ihdr(int width, int height)
+    {
+        var data = new byte[13];
+        WriteInt(data, 0, width);
+        WriteInt(data, 4, height);
+        data[8] = 8;
+        data[9] = 2;
+        return data;
+    }
+
+    private static void WriteChunk(Stream stream, string type, byte[] data)
+    {
+        var typeBytes = Encoding.ASCII.GetBytes(type);
+        WriteInt(stream, data.Length);
+        stream.Write(typeBytes, 0, 4);
+        stream.Write(data, 0, data.Length);
+        var crc = Crc32(typeBytes, data);
+        WriteInt(stream, (int)crc);
+    }
+
+    private static void WriteInt(Stream stream, int value)
+    {
+        stream.WriteByte((byte)(value >> 24));
+        stream.WriteByte((byte)(value >> 16));
+        stream.WriteByte((byte)(value >> 8));
+        stream.WriteByte((byte)value);
+    }
+
+    private static void WriteInt(byte[] buffer, int offset, int value)
+    {
+        buffer[offset] = (byte)(value >> 24);
+        buffer[offset + 1] = (byte)(value >> 16);
+        buffer[offset + 2] = (byte)(value >> 8);
+        buffer[offset + 3] = (byte)value;
+    }
+
+    private static void WriteAdler32(Stream stream, byte[] data)
+    {
+        uint a = 1, b = 0;
+        foreach (var value in data)
+        {
+            a = (a + value) % 65521;
+            b = (b + a) % 65521;
+        }
+        var adler = (b << 16) | a;
+        WriteInt(stream, (int)adler);
+    }
+
+    private static uint Crc32(byte[] type, byte[] data)
+    {
+        var crc = 0xFFFFFFFFu;
+        foreach (var value in type)
+            crc = CrcTable[(crc ^ value) & 0xFF] ^ (crc >> 8);
+        foreach (var value in data)
+            crc = CrcTable[(crc ^ value) & 0xFF] ^ (crc >> 8);
+        return crc ^ 0xFFFFFFFFu;
+    }
+
+    private static readonly uint[] CrcTable = BuildCrcTable();
+    private static readonly byte[] PngSignature = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    private const int SmXvirtualscreen = 76;
+    private const int SmYvirtualscreen = 77;
+    private const int SmCxvirtualscreen = 78;
+    private const int SmCyvirtualscreen = 79;
+    private const uint Srccopy = 0x00CC0020;
+
+    private static uint[] BuildCrcTable()
+    {
+        var table = new uint[256];
+        for (uint i = 0; i < 256; i++)
+        {
+            var c = i;
+            for (var k = 0; k < 8; k++)
+                c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+        return table;
+    }
+
+    [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int width, int height);
+    [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+    [DllImport("gdi32.dll")] private static extern bool BitBlt(IntPtr hdc, int x, int y, int cx, int cy, IntPtr src, int x1, int y1, uint rop);
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
+    [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr hdc);
+    [DllImport("gdi32.dll")] private static extern int GetDIBits(IntPtr hdc, IntPtr bitmap, uint start, uint lines, byte[] bits, ref BitmapInfo info, uint usage);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BitmapInfoHeader
+    {
+        public uint Size;
+        public int Width;
+        public int Height;
+        public ushort Planes;
+        public ushort BitCount;
+        public uint Compression;
+        public uint SizeImage;
+        public int XPelsPerMeter;
+        public int YPelsPerMeter;
+        public uint ClrUsed;
+        public uint ClrImportant;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BitmapInfo
+    {
+        public BitmapInfoHeader Header;
+        public uint Colors;
     }
 }
