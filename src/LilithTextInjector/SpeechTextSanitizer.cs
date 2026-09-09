@@ -25,8 +25,12 @@ internal static class SpeechTextSanitizer
         @":[a-z0-9_+\-]{2,}:",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    private static readonly Regex HeartToken = new(
+        @"(?:</3|<3|(?<![A-Za-zÀ-ÿ0-9])(?:[sS]2)+(?![A-Za-zÀ-ÿ0-9]))",
+        RegexOptions.Compiled);
+
     private static readonly Regex Emoticon = new(
-        @"(?:[tT][-_][tT]|[tT]{2}_[tT]{2}|[xX][dD]|[uU][wW][uU]|[oO][wW][oO]|[uU][mM][uU]|</3|<3|(?<![A-Za-zÀ-ÿ0-9])(?:[sS]2)+(?![A-Za-zÀ-ÿ0-9])|>[._]?<|>[._]<|\^[_ ]?\^|\^\^|-[._]-|\.[_.]\.|grr+|[:;=8][-']?[)(/\\DPpOocC|]|[)(DPp][-']?[:;=8]|(?<!\d):3(?!\d))",
+        @"(?:[tT][-_][tT]|[tT]{2}_[tT]{2}|[xX][dD]|[uU][wW][uU]|[oO][wW][oO]|[uU][mM][uU]|>[._]?<|>[._]<|\^[_ ]?\^|\^\^|-[._]-|\.[_.]\.|grr+|[:;=8][-']?[)(/\\DPpOocC|]|[)(DPp][-']?[:;=8]|(?<!\d):3(?!\d))",
         RegexOptions.Compiled);
 
     private static readonly Regex Laughter = new(
@@ -46,7 +50,8 @@ internal static class SpeechTextSanitizer
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly Regex PunctOnly = new(@"^[\s,.!?;:~…。，、！？～·•\-—]+$", RegexOptions.Compiled);
     private static readonly Regex ExtraPauses = new(@"([.,。，])(?:\s*[.,。，])+", RegexOptions.Compiled);
-    private static readonly Regex LeadingPause = new(@"^[.,\s]+", RegexOptions.Compiled);
+    private static readonly Regex LeadingPause = new(@"^[,.\s]+", RegexOptions.Compiled);
+    private static readonly Regex SpokenPeriod = new(@"(?<!\d)\.(?!\d)", RegexOptions.Compiled);
     private static readonly Regex TrailingPauseLines = new(@"\n[. ,]+$", RegexOptions.Compiled);
     private static readonly Regex NeverMatches = new(@"a^", RegexOptions.Compiled);
 
@@ -66,6 +71,10 @@ internal static class SpeechTextSanitizer
         ["blza"] = "beleza",
         ["bnt"] = "bonito",
         ["cm"] = "com",
+        ["coracao"] = "coração",
+        ["coracoes"] = "corações",
+        ["coraçao"] = "coração",
+        ["coracão"] = "coração",
         ["cmg"] = "comigo",
         ["cntg"] = "contigo",
         ["ctg"] = "contigo",
@@ -197,15 +206,17 @@ internal static class SpeechTextSanitizer
         cleaned = Url.Replace(cleaned, string.Empty);
         cleaned = SourceLabel.Replace(cleaned, string.Empty);
         cleaned = StripEmojiRunes(cleaned);
-        cleaned = EmojiShortcode.Replace(cleaned, ". ");
-        cleaned = Emoticon.Replace(cleaned, ". ");
-        cleaned = Laughter.Replace(cleaned, ". ");
-        cleaned = Token.Replace(cleaned, match => IsKeyboardSmash(match.Value) ? ". " : match.Value);
+        cleaned = HeartToken.Replace(cleaned, " coração ");
+        cleaned = EmojiShortcode.Replace(cleaned, ", ");
+        cleaned = Emoticon.Replace(cleaned, ", ");
+        cleaned = Laughter.Replace(cleaned, ", ");
+        cleaned = Token.Replace(cleaned, match => IsKeyboardSmash(match.Value) ? ", " : match.Value);
         cleaned = RepeatedLetters.Replace(cleaned, "$1");
         cleaned = HypeWordTail.Replace(cleaned, "$1");
-        cleaned = RepeatedExclaim.Replace(cleaned, ".");
+        cleaned = RepeatedExclaim.Replace(cleaned, ",");
         cleaned = RepeatedQuestion.Replace(cleaned, "?");
         cleaned = ExpandAbbreviations(cleaned);
+        cleaned = SpokenPeriod.Replace(cleaned, string.Empty);
         cleaned = SpaceAroundNewline.Replace(cleaned, "\n");
         cleaned = ExtraPauses.Replace(cleaned, "$1");
         cleaned = Spaces.Replace(cleaned, " ");
@@ -295,6 +306,19 @@ internal static class SpeechTextSanitizer
         var pendingPause = false;
         foreach (var rune in text.EnumerateRunes())
         {
+            if (IsHeartRune(rune.Value))
+            {
+                if (pendingPause)
+                {
+                    AppendPause(builder);
+                    pendingPause = false;
+                }
+                AppendSpokenHeart(builder);
+                continue;
+            }
+            // Variation selectors / ZWJ only decorate the previous emoji.
+            if (rune.Value is (>= 0xFE00 and <= 0xFE0F) or 0x200D)
+                continue;
             if (IsEmojiRune(rune.Value))
             {
                 pendingPause = true;
@@ -319,8 +343,24 @@ internal static class SpeechTextSanitizer
         var last = builder[builder.Length - 1];
         if (last is '.' or ',' or '?' or '!' or '。' or '，' or '？' or '！')
             return;
-        builder.Append(". ");
+        builder.Append(", ");
     }
+
+    private static void AppendSpokenHeart(StringBuilder builder)
+    {
+        if (builder.Length > 0)
+        {
+            var last = builder[builder.Length - 1];
+            if (!char.IsWhiteSpace(last) && last is not ',' and not '.' and not '，' and not '。')
+                builder.Append(' ');
+        }
+        builder.Append("coração ");
+    }
+
+    private static bool IsHeartRune(int value)
+        => value is 0x2661 or 0x2665 or 0x2763 or 0x2764
+            or (>= 0x1F493 and <= 0x1F49F)
+            or 0x1F5A4 or 0x1F90D or 0x1F90E or 0x1F9E1 or 0x1FA77;
 
     private static bool IsEmojiRune(int value)
     {
