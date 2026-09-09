@@ -27,6 +27,7 @@ using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using TMPro;
 using UnityEngine;
+using UnityEngine.Events;
 using UnityEngine.Localization.Settings;
 using UnityEngine.UI;
 using UI.Common;
@@ -7538,6 +7539,7 @@ internal static class NewTraySettingsAdapter
     private const float LegacyRightLabelCenter = LegacyLeftLabelCenter + 0.5f;
     private const float LegacyRightControlCenter = LegacyLeftControlCenter + 0.5f;
     private static readonly Vector2 LegacyHotkeyButtonSize = new(82f, 28f);
+    private static readonly Vector2 VoiceVolumeButtonSize = new(36f, 28f);
 
     private static TraySettingNewView? _view;
     private static TraySettingNewView? _boundView;
@@ -7560,7 +7562,8 @@ internal static class NewTraySettingsAdapter
     private static Il2CppSystem.Action<bool>? _advancedChanged;
     private static Il2CppSystem.Action<bool>? _textHotkeyClicked;
     private static Il2CppSystem.Action<bool>? _voiceHotkeyClicked;
-    private static Il2CppSystem.Action<bool>? _voiceVolumeClicked;
+    private static UnityAction? _voiceVolumeDownClicked;
+    private static UnityAction? _voiceVolumeUpClicked;
     private static readonly float[] VoiceVolumeSteps = { 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f, 4f };
     private static bool _readyLogged;
     private static TraySettingNewView? _layoutLoggedView;
@@ -7706,10 +7709,31 @@ internal static class NewTraySettingsAdapter
     {
         if (_voiceVolumeRow != null && _voiceVolumeSwitch != null)
             return;
-        _voiceVolumeClicked = DelegateSupport.ConvertDelegate<Il2CppSystem.Action<bool>>(
-            new System.Action<bool>(increase => StepVoiceVolume(increase)));
         (_voiceVolumeRow, _voiceVolumeSwitch, _voiceVolumeOnValue, _voiceVolumeOffValue) =
-            CreateHotkeyRow(view, "LilithModVoiceVolume", _voiceVolumeClicked!);
+            CreateHotkeyRow(view, "LilithModVoiceVolume", DelegateSupport.ConvertDelegate<Il2CppSystem.Action<bool>>(
+                new System.Action<bool>(_ => { }))!);
+        _voiceVolumeSwitch.OnValueChanged = null;
+        BindVoiceVolumeButtons(_voiceVolumeSwitch);
+    }
+
+    private static void BindVoiceVolumeButtons(SettingSwitchItems item)
+    {
+        _voiceVolumeDownClicked = DelegateSupport.ConvertDelegate<UnityAction>(
+            new System.Action(() => StepVoiceVolume(false)));
+        _voiceVolumeUpClicked = DelegateSupport.ConvertDelegate<UnityAction>(
+            new System.Action(() => StepVoiceVolume(true)));
+        BindVoiceVolumeButton(item._offButton, _voiceVolumeDownClicked);
+        BindVoiceVolumeButton(item._onButton, _voiceVolumeUpClicked);
+    }
+
+    private static void BindVoiceVolumeButton(Button? button, UnityAction? callback)
+    {
+        if (button == null || callback == null)
+            return;
+        button.gameObject.SetActive(true);
+        button.interactable = true;
+        button.onClick.RemoveAllListeners();
+        button.onClick.AddListener(callback);
     }
 
     private static void StepVoiceVolume(bool increase)
@@ -7814,7 +7838,7 @@ internal static class NewTraySettingsAdapter
         ConfigureLegacyColumnRow(view, _textHotkeySwitch, true, true);
         ConfigureLegacyColumnRow(view, _voiceHotkeySwitch, true, true);
         ConfigureLegacyColumnRow(view, _advancedSwitch, true, false);
-        ConfigureLegacyColumnRow(view, _voiceVolumeSwitch, true, true);
+        ConfigureVoiceVolumeRow(view, _voiceVolumeSwitch);
         if (_layoutLoggedView != view)
         {
             _layoutLoggedView = view;
@@ -7890,6 +7914,41 @@ internal static class NewTraySettingsAdapter
         }
         ConfigureLegacyControlButton(item._onButton, rowRect, panelRect, controlCenter, hotkey);
         ConfigureLegacyControlButton(item._offButton, rowRect, panelRect, controlCenter, hotkey);
+    }
+
+    private static void ConfigureVoiceVolumeRow(TraySettingNewView view, SettingSwitchItems? item)
+    {
+        if (item == null)
+            return;
+        var rowRect = item.GetComponent<RectTransform>();
+        var panelRect = FindViewPanel(view);
+        if (rowRect == null || panelRect == null)
+            return;
+
+        if (item._nameText != null)
+        {
+            PositionAtPanelCenter(item._nameText.rectTransform, rowRect, panelRect, LegacyRightLabelCenter);
+            item._nameText.alignment = TextAlignmentOptions.Center;
+        }
+
+        // Keep minus and plus as two separate hit targets. The hotkey layout
+        // stacks both switch buttons on the same point, so only + was clickable.
+        ConfigureVoiceVolumeButton(item._offButton, rowRect, panelRect, LegacyRightControlCenter - 0.04f);
+        ConfigureVoiceVolumeButton(item._onButton, rowRect, panelRect, LegacyRightControlCenter + 0.04f);
+    }
+
+    private static void ConfigureVoiceVolumeButton(
+        Button? button, RectTransform rowRect, RectTransform panelRect, float normalizedCenter)
+    {
+        if (button == null)
+            return;
+        button.gameObject.SetActive(true);
+        button.interactable = true;
+        var rect = button.GetComponent<RectTransform>();
+        if (rect == null)
+            return;
+        rect.sizeDelta = VoiceVolumeButtonSize;
+        PositionAtPanelCenter(rect, rowRect, panelRect, normalizedCenter);
     }
 
     private static RectTransform? FindViewPanel(TraySettingNewView view)
@@ -7986,8 +8045,10 @@ internal static class NewTraySettingsAdapter
     {
         if (_voiceVolumeSwitch == null)
             return;
-        if (_voiceVolumeSwitch._currentValue)
-            _voiceVolumeSwitch.ApplyValue(false, false);
+        if (_voiceVolumeSwitch._offButton != null)
+            _voiceVolumeSwitch._offButton.gameObject.SetActive(true);
+        if (_voiceVolumeSwitch._onButton != null)
+            _voiceVolumeSwitch._onButton.gameObject.SetActive(true);
         var percent = VoiceVolumePercent(Math.Clamp(Plugin.VoicePlaybackGain.Value, 0.2f, 4f));
         var label = DialogueManagerUpdatePatch.LocalizedText(
             $"語音音量 {percent}", $"语音音量 {percent}", $"音声音量 {percent}", $"Voice volume {percent}");
