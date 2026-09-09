@@ -115,6 +115,7 @@ public sealed class Plugin : BasePlugin
     internal static ConfigEntry<KeyCode> TextInputKey = null!;
     internal static ConfigEntry<KeyCode> VoiceInputKey = null!;
     internal static ConfigEntry<bool> AdvancedComputerActionsEnabled = null!;
+    internal static ConfigEntry<string> LeagueDraftProject = null!;
     internal static ConfigEntry<bool> CodexBridgeEnabled = null!;
     internal static ConfigEntry<bool> CodexBridgeVoiceEnabled = null!;
 
@@ -263,6 +264,9 @@ public sealed class Plugin : BasePlugin
             "Key held while recording AI voice input. This can also be changed in the in-game settings.");
         AdvancedComputerActionsEnabled = Config.Bind("ComputerActions", "AdvancedEnabled", false,
             "Unlock reviewed advanced computer controls. This does not grant Windows administrator rights or allow arbitrary shell commands.");
+        LeagueDraftProject = Config.Bind("ComputerActions", "LeagueDraftProject",
+            "/home/nic/projects/lol-champ-select-recommender",
+            "WSL path to lol-champ-select-recommender. Used to dump live champ-select lanes and picks as text.");
         CodexBridgeEnabled = Config.Bind("CodexBridge", "Enabled", true,
             "Show local Codex lifecycle status through Lilith. No prompt text, API key, or Codex login data is read.");
         CodexBridgeVoiceEnabled = Config.Bind("CodexBridge", "VoiceEnabled", true,
@@ -4818,10 +4822,13 @@ internal static class DialogueManagerUpdatePatch
             var interfaceLanguage = GetAiInterfaceLanguage();
             var model = Uri.EscapeDataString(Plugin.GeminiModel.Value.Trim());
             var url = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent";
-            var screenLook = ScreenLook.ShouldCapture(userText);
             var leagueHelp = ScreenLook.LooksLikeLeagueRequest(userText);
+            var leagueBrief = leagueHelp ? LeagueDraft.TryReadBrief() : string.Empty;
+            var screenLook = ScreenLook.ShouldCapture(userText) && string.IsNullOrWhiteSpace(leagueBrief);
             var screenCapture = screenLook ? ScreenLook.CaptureDesktop() : default;
-            var contents = BuildGeminiContents(screenCapture.Success ? screenCapture.JpegPath : null);
+            var contents = BuildGeminiContents(
+                screenCapture.Success ? screenCapture.JpegPath : null,
+                string.IsNullOrWhiteSpace(leagueBrief) ? null : leagueBrief);
             var nameContext = BuildPlayerNameContext(userText, playerName);
             var timeContext = BuildLocalTimeContext();
             var weatherContext = await BuildWeatherContextAsync().ConfigureAwait(false);
@@ -4845,7 +4852,12 @@ internal static class DialogueManagerUpdatePatch
             else if (string.Equals(activeProvider, "Qwen", StringComparison.Ordinal))
                 systemInstruction += "\nA web-search tool is available. Use it whenever the answer materially depends on recent or changeable facts such as news, current people or policies, prices, weather, schedules, software/model versions, service availability, or product features. Do not search for casual conversation, roleplay, personal advice, or stable facts.";
             systemInstruction += WatchTogether.BuildPrompt();
-            if (screenLook)
+            if (!string.IsNullOrWhiteSpace(leagueBrief))
+            {
+                systemInstruction += "\nLeague draft text is attached from the live League client. Trust that list for who is in which lane, who is picked/hovered, and bans. Do not guess champions from a screenshot. You may web-search current patch advice for the user's lane versus those threats.";
+                Plugin.PluginLog.LogInfo($"Attached live League champ-select brief ({leagueBrief.Length} chars).");
+            }
+            else if (screenLook)
             {
                 systemInstruction += ScreenLook.PromptFor(userText);
                 if (screenCapture.Success)
@@ -4870,7 +4882,8 @@ internal static class DialogueManagerUpdatePatch
             {
                 await RequestQwenResponsesAsync(systemInstruction, userText, poseContext, japaneseVoiceMode,
                     useWebSearch: true, forceWebSearch: useGoogleSearch, desktopToolsEnabled,
-                    screenCapture.Success ? screenCapture.JpegPath : null).ConfigureAwait(false);
+                    screenCapture.Success ? screenCapture.JpegPath : null,
+                    string.IsNullOrWhiteSpace(leagueBrief) ? null : leagueBrief).ConfigureAwait(false);
                 return;
             }
             if (!string.Equals(activeProvider, "Gemini", StringComparison.Ordinal))
@@ -5437,7 +5450,7 @@ internal static class DialogueManagerUpdatePatch
 
     private static async Task RequestQwenResponsesAsync(string systemInstruction, string userText,
         PoseContext poseContext, bool japaneseVoiceMode, bool useWebSearch, bool forceWebSearch, bool desktopToolsEnabled,
-        string? leagueImagePath = null)
+        string? leagueImagePath = null, string? extraText = null)
     {
         var baseUrl = NormalizeQwenBaseUrl(Plugin.QwenBaseUrl.Value);
         var session = new QwenAgentSession
@@ -5450,12 +5463,12 @@ internal static class DialogueManagerUpdatePatch
             UseWebSearch = useWebSearch,
             ForceWebSearch = forceWebSearch,
             DesktopToolsEnabled = desktopToolsEnabled,
-            Input = BuildQwenInput(leagueImagePath)
+            Input = BuildQwenInput(leagueImagePath, extraText)
         };
         await SendQwenAgentRequestAsync(session).ConfigureAwait(false);
     }
 
-    private static List<object> BuildQwenInput(string? leagueImagePath = null)
+    private static List<object> BuildQwenInput(string? leagueImagePath = null, string? extraText = null)
     {
         var input = new List<object>();
         List<ChatTurn> snapshot;
@@ -5465,6 +5478,9 @@ internal static class DialogueManagerUpdatePatch
         {
             var turn = snapshot[i];
             var role = turn.Role == "model" ? "assistant" : "user";
+            var text = turn.Text;
+            if (i == snapshot.Count - 1 && role == "user" && !string.IsNullOrWhiteSpace(extraText))
+                text = text + "\n\n" + extraText;
             if (i == snapshot.Count - 1
                 && role == "user"
                 && ScreenLook.TryReadImageBase64(leagueImagePath ?? string.Empty, out var mimeType, out var imageData))
@@ -5474,7 +5490,7 @@ internal static class DialogueManagerUpdatePatch
                     role,
                     content = new object[]
                     {
-                        new { type = "input_text", text = turn.Text },
+                        new { type = "input_text", text },
                         new
                         {
                             type = "input_image",
@@ -5485,7 +5501,7 @@ internal static class DialogueManagerUpdatePatch
             }
             else
             {
-                input.Add(new { role, content = turn.Text });
+                input.Add(new { role, content = text });
             }
         }
         return input;
@@ -6629,7 +6645,7 @@ internal static class DialogueManagerUpdatePatch
         }
     }
 
-    private static List<object> BuildGeminiContents(string? leagueImagePath = null)
+    private static List<object> BuildGeminiContents(string? leagueImagePath = null, string? extraText = null)
     {
         List<ChatTurn> snapshot;
         lock (MemoryLock)
@@ -6639,6 +6655,9 @@ internal static class DialogueManagerUpdatePatch
         for (var i = 0; i < snapshot.Count; i++)
         {
             var turn = snapshot[i];
+            var text = turn.Text;
+            if (i == snapshot.Count - 1 && turn.Role == "user" && !string.IsNullOrWhiteSpace(extraText))
+                text = text + "\n\n" + extraText;
             if (i == snapshot.Count - 1
                 && turn.Role == "user"
                 && ScreenLook.TryReadImageBase64(leagueImagePath ?? string.Empty, out var mimeType, out var imageData))
@@ -6648,7 +6667,7 @@ internal static class DialogueManagerUpdatePatch
                     role = turn.Role,
                     parts = new object[]
                     {
-                        new Dictionary<string, object> { ["text"] = turn.Text },
+                        new Dictionary<string, object> { ["text"] = text },
                         new Dictionary<string, object>
                         {
                             ["inline_data"] = new Dictionary<string, object>
@@ -6662,7 +6681,7 @@ internal static class DialogueManagerUpdatePatch
             }
             else
             {
-                contents.Add(new { role = turn.Role, parts = new[] { new { text = turn.Text } } });
+                contents.Add(new { role = turn.Role, parts = new[] { new { text } } });
             }
         }
         return contents;
