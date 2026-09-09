@@ -7,10 +7,10 @@ AssertEqual("nem sei o que é,", SpeechTextSanitizer.Prepare("KKKKKKKKKK nem sei
 AssertEqual("sua foto muito hype,\ntendencia", SpeechTextSanitizer.Prepare("asuhduasd sua foto mto hype asopdkaspd\ntendencia"));
 AssertEqual("sim,\nsó o cria da korea", SpeechTextSanitizer.Prepare("sim kkkkkk\nsó o cria da korea\napsodkpoasf"));
 AssertEqual("oi gatinho", SpeechTextSanitizer.Prepare("oi gatinho"));
-AssertEqual("eu te amo coração", SpeechTextSanitizer.Prepare("eu te amo ❤️"));
-AssertEqual("te amo coração", SpeechTextSanitizer.Prepare("te amo s2"));
-AssertEqual("te amo coração", SpeechTextSanitizer.Prepare("te amo S2"));
-AssertEqual("coração", SpeechTextSanitizer.Prepare("s2"));
+AssertEqual("eu te amo,", SpeechTextSanitizer.Prepare("eu te amo ❤️"));
+AssertEqual("te amo,", SpeechTextSanitizer.Prepare("te amo s2"));
+AssertEqual("te amo,", SpeechTextSanitizer.Prepare("te amo S2"));
+AssertEqual(string.Empty, SpeechTextSanitizer.Prepare("s2"));
 AssertEqual("coração", SpeechTextSanitizer.Prepare("coracao"));
 AssertEqual("meu coração", SpeechTextSanitizer.Prepare("meu coracao"));
 AssertEqual("atapo,\nkj", SpeechTextSanitizer.Prepare("atapo 🤠\nkj\naspodkaposf"));

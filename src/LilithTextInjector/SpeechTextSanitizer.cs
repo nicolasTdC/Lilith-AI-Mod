@@ -206,7 +206,7 @@ internal static class SpeechTextSanitizer
         cleaned = Url.Replace(cleaned, string.Empty);
         cleaned = SourceLabel.Replace(cleaned, string.Empty);
         cleaned = StripEmojiRunes(cleaned);
-        cleaned = HeartToken.Replace(cleaned, " coração ");
+        cleaned = HeartToken.Replace(cleaned, ", ");
         cleaned = EmojiShortcode.Replace(cleaned, ", ");
         cleaned = Emoticon.Replace(cleaned, ", ");
         cleaned = Laughter.Replace(cleaned, ", ");
@@ -306,17 +306,6 @@ internal static class SpeechTextSanitizer
         var pendingPause = false;
         foreach (var rune in text.EnumerateRunes())
         {
-            if (IsHeartRune(rune.Value))
-            {
-                if (pendingPause)
-                {
-                    AppendPause(builder);
-                    pendingPause = false;
-                }
-                AppendSpokenHeart(builder);
-                continue;
-            }
-            // Variation selectors / ZWJ only decorate the previous emoji.
             if (rune.Value is (>= 0xFE00 and <= 0xFE0F) or 0x200D)
                 continue;
             if (IsEmojiRune(rune.Value))
@@ -345,22 +334,6 @@ internal static class SpeechTextSanitizer
             return;
         builder.Append(", ");
     }
-
-    private static void AppendSpokenHeart(StringBuilder builder)
-    {
-        if (builder.Length > 0)
-        {
-            var last = builder[builder.Length - 1];
-            if (!char.IsWhiteSpace(last) && last is not ',' and not '.' and not '，' and not '。')
-                builder.Append(' ');
-        }
-        builder.Append("coração ");
-    }
-
-    private static bool IsHeartRune(int value)
-        => value is 0x2661 or 0x2665 or 0x2763 or 0x2764
-            or (>= 0x1F493 and <= 0x1F49F)
-            or 0x1F5A4 or 0x1F90D or 0x1F90E or 0x1F9E1 or 0x1FA77;
 
     private static bool IsEmojiRune(int value)
     {
