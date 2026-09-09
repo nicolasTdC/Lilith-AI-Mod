@@ -5121,6 +5121,8 @@ internal static class DialogueManagerUpdatePatch
 
     private static GeminiToolResult ExecuteGeminiComputerTool(GeminiFunctionCallData call, string userText = "")
     {
+        if (ScreenLook.IsLookTool(call.Name))
+            return ExecuteLookAtScreenTool(call, userText);
         if (!Plugin.AdvancedComputerActionsEnabled.Value)
             return ToolResult(call, false, ApiKeyText("進階電腦操作目前是關閉的。", "高级电脑操作目前已关闭。", "高度なPC操作は今オフになっているよ。", "Advanced PC controls are currently disabled."));
         try
@@ -5139,9 +5141,6 @@ internal static class DialogueManagerUpdatePatch
                     return TryHandleScreenshotCommand("幫我截圖", out var screenshotReply)
                         ? ToolResultFromReply(call, screenshotReply)
                         : ToolResult(call, false, "Screenshot action was not available.");
-                case ScreenLook.ToolName:
-                case ScreenLook.LegacyToolName:
-                    return ExecuteLookAtScreenTool(call, userText);
                 case "copy_text":
                     return ExecuteCopyTextTool(call, GetToolString(call.Args, "text", 4000));
                 case "browser_search":
@@ -5349,7 +5348,10 @@ internal static class DialogueManagerUpdatePatch
     {
         var capture = ScreenLook.CaptureDesktop();
         if (!capture.Success)
+        {
+            Plugin.PluginLog.LogWarning($"look_at_screen failed: {capture.Error}");
             return ToolResult(call, false, $"Could not capture the screen: {capture.Error}");
+        }
         Plugin.PluginLog.LogInfo($"look_at_screen captured {capture.JpegPath}.");
         var league = ScreenLook.LooksLikeLeagueRequest(userText);
         return new GeminiToolResult

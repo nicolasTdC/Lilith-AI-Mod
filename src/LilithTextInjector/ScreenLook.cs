@@ -21,8 +21,10 @@ internal static class ScreenLook
         "\nLeague champ-select help: A screenshot of the user's desktop is attached. Look at the champion select UI: the user's assigned lane/role, their profile/hover, ally picks and hovers, enemy picks, and bans. Ignore unrelated windows. Then you MUST use web search for the current patch meta for that exact lane versus the visible threats. Suggest one main champion they can still pick and one backup. Stay in character, keep it short, and do not recommend banned or already-taken champions. If the screenshot is not champ select, say so and ask what lane they are on.";
 
     private static readonly Regex LookCue = new(
-        @"(?i)(?:olha(?:r)?|olhe|v[eê](?:ja)?)\s+(?:isso|isto|aqui|a[ií]|pra\s+(?:mim\s+)?(?:isso|aqui|tela)|a\s+tela|o\s+monitor|nesta|nessa|o\s+que)|"
+        @"(?i)(?:olha(?:r)?|olhe|v[eê](?:ja)?)\s+(?:isso|isto|aqui|a[ií]|pra\s+(?:mim\s+)?(?:isso|aqui|tela)|a\s+tela|o\s+monitor|nesta|nessa|o\s+que|se\s+voc[eê])|"
+        + @"(?i)(?:consegue(?:m)?\s+ver|ver)\s+(?:a|minha|o|na)\s+(?:tela|ecr[aã]|screen)|"
         + @"(?i)o\s+que\s+(?:tem|t[aá]|est[aá])\s+(?:na|no)\s+(?:tela|ecr[aã]|monitor|screen)|"
+        + @"(?i)see\s+my\s+screen|"
         + @"(?i)(?:analisa(?:r)?|l[eê](?:r)?)\s+(?:isso|a\s+tela|a\s+imagem|o\s+print|o\s+erro)|"
         + @"(?i)(?:tira(?:r)?|pega(?:r)?)\s+(?:um\s+)?(?:print|screenshot).{0,24}(?:v[eê]|diz|fala|olha|analisa)|"
         + @"(?i)look\s+at\s+(?:this|that|it|my\s+screen|the\s+screen|the\s+monitor)|"
