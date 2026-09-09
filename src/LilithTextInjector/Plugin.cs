@@ -1048,7 +1048,7 @@ internal static class DialogueManagerUpdatePatch
 
         try
         {
-            var capture = LeagueChampSelect.CaptureDesktop();
+            var capture = ScreenLook.CaptureDesktop();
             if (!capture.Success)
                 throw new InvalidOperationException(capture.Error);
             var fileName = Path.GetFileName(capture.PngPath);
@@ -1132,7 +1132,7 @@ internal static class DialogueManagerUpdatePatch
             "我能替你截圖、開啟常用資料夾、切換或排列視窗、顯示桌面、開啟工作檢視、複製指定文字，以及用瀏覽器搜尋。也能查看電量、記憶體、系統磁碟和網路狀態；刪檔、關機、密碼與任意終端指令不在權限內。",
             "我能替你截图、打开常用文件夹、切换或排列窗口、显示桌面、打开任务视图、复制指定文字，以及用浏览器搜索。也能查看电量、内存、系统磁盘和网络状态；删除文件、关机、密码与任意终端命令不在权限内。",
             "スクリーンショット、よく使うフォルダー、ウィンドウの切替や整列、デスクトップ表示、タスクビュー、指定した文字のコピー、ブラウザ検索ができるよ。バッテリー、メモリ、システムドライブ、ネット接続も確認できるけれど、削除、シャットダウン、パスワード、任意のコマンド実行はできない。",
-            "I can take screenshots, help with League champ select by looking at the draft and searching current picks, open common folders, switch or arrange windows, show the desktop, open Task View, copy text you specify, and search in your browser. I can also report battery, memory, system-drive, and network status; deletion, shutdown, passwords, and arbitrary shell commands stay blocked.");
+            "I can take screenshots, look at your screen and tell you what I see, help with League champ select, open common folders, switch or arrange windows, show the desktop, open Task View, copy text you specify, and search in your browser. I can also report battery, memory, system-drive, and network status; deletion, shutdown, passwords, and arbitrary shell commands stay blocked.");
         return true;
     }
 
@@ -4818,9 +4818,10 @@ internal static class DialogueManagerUpdatePatch
             var interfaceLanguage = GetAiInterfaceLanguage();
             var model = Uri.EscapeDataString(Plugin.GeminiModel.Value.Trim());
             var url = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent";
-            var leagueHelp = LeagueChampSelect.LooksLikeRequest(userText);
-            var leagueCapture = leagueHelp ? LeagueChampSelect.CaptureDesktop() : default;
-            var contents = BuildGeminiContents(leagueCapture.Success ? leagueCapture.JpegPath : null);
+            var screenLook = ScreenLook.ShouldCapture(userText);
+            var leagueHelp = ScreenLook.LooksLikeLeagueRequest(userText);
+            var screenCapture = screenLook ? ScreenLook.CaptureDesktop() : default;
+            var contents = BuildGeminiContents(screenCapture.Success ? screenCapture.JpegPath : null);
             var nameContext = BuildPlayerNameContext(userText, playerName);
             var timeContext = BuildLocalTimeContext();
             var weatherContext = await BuildWeatherContextAsync().ConfigureAwait(false);
@@ -4844,26 +4845,26 @@ internal static class DialogueManagerUpdatePatch
             else if (string.Equals(activeProvider, "Qwen", StringComparison.Ordinal))
                 systemInstruction += "\nA web-search tool is available. Use it whenever the answer materially depends on recent or changeable facts such as news, current people or policies, prices, weather, schedules, software/model versions, service availability, or product features. Do not search for casual conversation, roleplay, personal advice, or stable facts.";
             systemInstruction += WatchTogether.BuildPrompt();
-            if (leagueHelp)
+            if (screenLook)
             {
-                systemInstruction += LeagueChampSelect.SystemPrompt;
-                if (leagueCapture.Success)
-                    Plugin.PluginLog.LogInfo($"Attached a champ-select screenshot for draft help ({Path.GetFileName(leagueCapture.JpegPath)}).");
+                systemInstruction += ScreenLook.PromptFor(userText);
+                if (screenCapture.Success)
+                    Plugin.PluginLog.LogInfo($"Attached a desktop screenshot so Lilith can look ({Path.GetFileName(screenCapture.JpegPath)}).");
                 else
-                    Plugin.PluginLog.LogWarning($"Champ-select screenshot failed: {leagueCapture.Error}");
+                    Plugin.PluginLog.LogWarning($"Screen-look screenshot failed: {screenCapture.Error}");
             }
             var desktopToolsEnabled = Plugin.AdvancedComputerActionsEnabled.Value;
             if (desktopToolsEnabled
                 && (string.Equals(activeProvider, "Gemini", StringComparison.Ordinal)
                     || string.Equals(activeProvider, "Qwen", StringComparison.Ordinal)))
             {
-                systemInstruction += "\nDesktop agent policy: You may use the declared local desktop tools whenever they help fulfill the user's intent. Prefer tools over asking the user to repeat an exact command, and you may call several independent tools in parallel to complete a routine. Never claim an action succeeded unless its function result says success. All tools operate locally. Never request or expose passwords, API keys, OTPs, clipboard contents, file contents, browsing history, precise location, or personal data. Screenshots stay local except league_champ_select, which attaches the current screen so you can read League champion select. Never infer sleep or lock merely because the user says they are tired; call those tools only when the user explicitly asks the computer to sleep or lock. For music, call youtube_music only when the user explicitly asks to play, change, or start a song, playlist, or radio. Never start music unsolicited, never default to lofi/chill playlists, and never start another playlist if music is already playing unless the user asked to change it. For League pick/draft help, call league_champ_select if no champ-select screenshot is already attached, then web-search current patch advice. Do not ask for Google passwords. Destructive file operations, closing apps, shutdown, restart, arbitrary typing, arbitrary shortcuts, shell commands, and privilege elevation are unavailable. If a tool is unavailable, explain naturally without pretending it ran.";
+                systemInstruction += "\nDesktop agent policy: You may use the declared local desktop tools whenever they help fulfill the user's intent. Prefer tools over asking the user to repeat an exact command, and you may call several independent tools in parallel to complete a routine. Never claim an action succeeded unless its function result says success. All tools operate locally. Never request or expose passwords, API keys, OTPs, clipboard contents, file contents, browsing history, precise location, or personal data. Screenshots stay local except look_at_screen, which attaches the current screen when the user asks you to look at something. Never infer sleep or lock merely because the user says they are tired; call those tools only when the user explicitly asks the computer to sleep or lock. For music, call youtube_music only when the user explicitly asks to play, change, or start a song, playlist, or radio. Never start music unsolicited, never default to lofi/chill playlists, and never start another playlist if music is already playing unless the user asked to change it. If the user asks you to look at the screen, an error, a clip, or League champ select and no screenshot is attached yet, call look_at_screen. For League pick/draft help, also web-search current patch advice. Do not ask for Google passwords. Destructive file operations, closing apps, shutdown, restart, arbitrary typing, arbitrary shortcuts, shell commands, and privilege elevation are unavailable. If a tool is unavailable, explain naturally without pretending it ran.";
             }
             if (string.Equals(activeProvider, "Qwen", StringComparison.Ordinal))
             {
                 await RequestQwenResponsesAsync(systemInstruction, userText, poseContext, japaneseVoiceMode,
                     useWebSearch: true, forceWebSearch: useGoogleSearch, desktopToolsEnabled,
-                    leagueCapture.Success ? leagueCapture.JpegPath : null).ConfigureAwait(false);
+                    screenCapture.Success ? screenCapture.JpegPath : null).ConfigureAwait(false);
                 return;
             }
             if (!string.Equals(activeProvider, "Gemini", StringComparison.Ordinal))
@@ -5003,7 +5004,7 @@ internal static class DialogueManagerUpdatePatch
             new { name = "window_action", description = "Perform a reversible window-management action. Do not use close because closing apps is unavailable.", parameters = Parameters(new { action = new { type = "STRING", description = "One of: show_desktop, task_view, switch_previous, minimize, maximize, restore, snap_left, snap_right." } }, "action") },
             new { name = "media_control", description = "Control the active system media session with a standard media key.", parameters = Parameters(new { action = new { type = "STRING", description = "One of: play_pause, next, previous, stop, mute, volume_up, volume_down." } }, "action") },
             new { name = "take_screenshot", description = "Capture all local monitors to the user's Pictures/Lilith Screenshots folder. The screenshot remains local and is never uploaded or returned to the model.", parameters = Parameters(new { }) },
-            new { name = LeagueChampSelect.ToolName, description = LeagueChampSelect.ToolDescription, parameters = Parameters(new { }) },
+            new { name = ScreenLook.ToolName, description = ScreenLook.ToolDescription, parameters = Parameters(new { }) },
             new { name = "copy_text", description = "Write user-specified non-sensitive text to the local clipboard. Never use for passwords, API keys, OTPs, tokens, private identifiers, or other credentials. Clipboard reading is unavailable.", parameters = Parameters(new { text = new { type = "STRING", description = "The exact non-sensitive text the user explicitly wants copied." } }, "text") },
             new { name = "browser_search", description = "Open the default browser with a Google search. Use when the user explicitly wants results opened in their browser; ordinary factual questions can use Google Search instead.", parameters = Parameters(new { query = new { type = "STRING", description = "Search query explicitly requested by the user." } }, "query") },
             new { name = "youtube_music", description = "Play a song, playlist, radio, liked music, or library on YouTube Music only when the user explicitly asks to play or change music. Never call this unsolicited, never default to lofi, and never start another playlist over music that is already playing. Uses the signed-in browser session. Never ask for a password.", parameters = Parameters(new { intent = new { type = "STRING", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "STRING", description = "Song, artist, or playlist name. Required for song, playlist, and radio. Ignored for liked and library." } }, "intent") },
@@ -5046,7 +5047,7 @@ internal static class DialogueManagerUpdatePatch
                     functionResponse["id"] = result.Id;
                 responseParts.Add(new Dictionary<string, object> { ["functionResponse"] = functionResponse });
                 if (!string.IsNullOrWhiteSpace(result.ImagePath)
-                    && LeagueChampSelect.TryReadImageBase64(result.ImagePath, out var mimeType, out var imageData))
+                    && ScreenLook.TryReadImageBase64(result.ImagePath, out var mimeType, out var imageData))
                 {
                     responseParts.Add(new Dictionary<string, object>
                     {
@@ -5056,9 +5057,11 @@ internal static class DialogueManagerUpdatePatch
                             ["data"] = imageData
                         }
                     });
-                    batch.Session.UseGoogleSearch = true;
-                    if (!batch.Session.SystemInstruction.Contains(LeagueChampSelect.SystemPrompt, StringComparison.Ordinal))
-                        batch.Session.SystemInstruction += LeagueChampSelect.SystemPrompt;
+                    var lookPrompt = ScreenLook.PromptFor(batch.Session.UserText);
+                    if (ScreenLook.ShouldWebSearch(batch.Session.UserText))
+                        batch.Session.UseGoogleSearch = true;
+                    if (!batch.Session.SystemInstruction.Contains(lookPrompt, StringComparison.Ordinal))
+                        batch.Session.SystemInstruction += lookPrompt;
                 }
             }
             batch.Session.Contents.Add(new { role = "user", parts = responseParts.ToArray() });
@@ -5136,8 +5139,9 @@ internal static class DialogueManagerUpdatePatch
                     return TryHandleScreenshotCommand("幫我截圖", out var screenshotReply)
                         ? ToolResultFromReply(call, screenshotReply)
                         : ToolResult(call, false, "Screenshot action was not available.");
-                case LeagueChampSelect.ToolName:
-                    return ExecuteLeagueChampSelectTool(call);
+                case ScreenLook.ToolName:
+                case ScreenLook.LegacyToolName:
+                    return ExecuteLookAtScreenTool(call, userText);
                 case "copy_text":
                     return ExecuteCopyTextTool(call, GetToolString(call.Args, "text", 4000));
                 case "browser_search":
@@ -5341,19 +5345,22 @@ internal static class DialogueManagerUpdatePatch
         return ToolResult(call, true, ApiKeyText($"已設定 {minutes:0.##} 分鐘的計時器。", $"已设置 {minutes:0.##} 分钟的计时器。", $"{minutes:0.##}分のタイマーを設定したよ。", $"Set a timer for {minutes:0.##} minute(s)."));
     }
 
-    private static GeminiToolResult ExecuteLeagueChampSelectTool(GeminiFunctionCallData call)
+    private static GeminiToolResult ExecuteLookAtScreenTool(GeminiFunctionCallData call, string userText)
     {
-        var capture = LeagueChampSelect.CaptureDesktop();
+        var capture = ScreenLook.CaptureDesktop();
         if (!capture.Success)
             return ToolResult(call, false, $"Could not capture the screen: {capture.Error}");
-        Plugin.PluginLog.LogInfo($"league_champ_select captured {capture.JpegPath}.");
+        Plugin.PluginLog.LogInfo($"look_at_screen captured {capture.JpegPath}.");
+        var league = ScreenLook.LooksLikeLeagueRequest(userText);
         return new GeminiToolResult
         {
             Name = call.Name,
             Id = call.Id,
             Success = true,
             ImagePath = capture.JpegPath,
-            Message = "Screenshot captured. Read the attached image for League champion select (your lane, profile/hover, allies, enemies, bans). Then web-search current patch advice for that lane. Recommend one pick plus a backup that is still available."
+            Message = league
+                ? "Screenshot captured. Read the attached image for League champion select (your lane, profile/hover, allies, enemies, bans). Then web-search current patch advice for that lane. Recommend one pick plus a backup that is still available."
+                : "Screenshot captured. Look at the attached image, focus on what the user asked, and answer in character. Do not narrate unrelated windows or personal data."
         };
     }
 
@@ -5450,7 +5457,7 @@ internal static class DialogueManagerUpdatePatch
             var role = turn.Role == "model" ? "assistant" : "user";
             if (i == snapshot.Count - 1
                 && role == "user"
-                && LeagueChampSelect.TryReadImageBase64(leagueImagePath ?? string.Empty, out var mimeType, out var imageData))
+                && ScreenLook.TryReadImageBase64(leagueImagePath ?? string.Empty, out var mimeType, out var imageData))
             {
                 input.Add(new
                 {
@@ -5596,7 +5603,7 @@ internal static class DialogueManagerUpdatePatch
         tools.Add(new { type = "function", name = "window_action", description = "Perform a reversible window-management action. Closing apps is unavailable.", parameters = Parameters(new { action = new { type = "string", description = "One of: show_desktop, task_view, switch_previous, minimize, maximize, restore, snap_left, snap_right." } }, "action") });
         tools.Add(new { type = "function", name = "media_control", description = "Control the active system media session with a standard media key.", parameters = Parameters(new { action = new { type = "string", description = "One of: play_pause, next, previous, stop, mute, volume_up, volume_down." } }, "action") });
         tools.Add(new { type = "function", name = "take_screenshot", description = "Capture all local monitors to the user's Pictures/Lilith Screenshots folder. The screenshot remains local and is never uploaded or returned to the model.", parameters = Parameters(new { }) });
-        tools.Add(new { type = "function", name = LeagueChampSelect.ToolName, description = LeagueChampSelect.ToolDescription, parameters = Parameters(new { }) });
+        tools.Add(new { type = "function", name = ScreenLook.ToolName, description = ScreenLook.ToolDescription, parameters = Parameters(new { }) });
         tools.Add(new { type = "function", name = "copy_text", description = "Write user-specified non-sensitive text to the local clipboard. Never use for passwords, API keys, OTPs, tokens, private identifiers, or other credentials. Clipboard reading is unavailable.", parameters = Parameters(new { text = new { type = "string", description = "The exact non-sensitive text the user explicitly wants copied." } }, "text") });
         tools.Add(new { type = "function", name = "browser_search", description = "Open the default browser with a Google search only when the user asks to see results in their browser. Prefer the built-in web search tool for factual lookups.", parameters = Parameters(new { query = new { type = "string", description = "Search query explicitly requested by the user." } }, "query") });
         tools.Add(new { type = "function", name = "youtube_music", description = "Play a song, playlist, radio, liked music, or library on YouTube Music only when the user explicitly asks to play or change music. Never call this unsolicited, never default to lofi, and never start another playlist over music that is already playing.", parameters = Parameters(new { intent = new { type = "string", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "string", description = "Song, artist, or playlist name. Required for song, playlist, and radio." } }, "intent") });
@@ -5633,11 +5640,13 @@ internal static class DialogueManagerUpdatePatch
                     output = JsonSerializer.Serialize(new { success = result.Success, result = result.Message })
                 });
                 if (!string.IsNullOrWhiteSpace(result.ImagePath)
-                    && LeagueChampSelect.TryReadImageBase64(result.ImagePath, out var mimeType, out var imageData))
+                    && ScreenLook.TryReadImageBase64(result.ImagePath, out var mimeType, out var imageData))
                 {
-                    batch.Session.ForceWebSearch = true;
-                    if (!batch.Session.SystemInstruction.Contains(LeagueChampSelect.SystemPrompt, StringComparison.Ordinal))
-                        batch.Session.SystemInstruction += LeagueChampSelect.SystemPrompt;
+                    var lookPrompt = ScreenLook.PromptFor(batch.Session.UserText);
+                    if (ScreenLook.ShouldWebSearch(batch.Session.UserText))
+                        batch.Session.ForceWebSearch = true;
+                    if (!batch.Session.SystemInstruction.Contains(lookPrompt, StringComparison.Ordinal))
+                        batch.Session.SystemInstruction += lookPrompt;
                     batch.Session.Input.Add(new
                     {
                         role = "user",
@@ -6620,7 +6629,7 @@ internal static class DialogueManagerUpdatePatch
             var turn = snapshot[i];
             if (i == snapshot.Count - 1
                 && turn.Role == "user"
-                && LeagueChampSelect.TryReadImageBase64(leagueImagePath ?? string.Empty, out var mimeType, out var imageData))
+                && ScreenLook.TryReadImageBase64(leagueImagePath ?? string.Empty, out var mimeType, out var imageData))
             {
                 contents.Add(new
                 {

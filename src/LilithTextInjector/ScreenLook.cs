@@ -6,25 +6,56 @@ using System.Text.RegularExpressions;
 
 namespace LilithTextInjector;
 
-internal static class LeagueChampSelect
+internal static class ScreenLook
 {
-    internal const string ToolName = "league_champ_select";
+    internal const string ToolName = "look_at_screen";
+    internal const string LegacyToolName = "league_champ_select";
 
     internal const string ToolDescription =
-        "Capture the current screen so you can read a League of Legends champion select lobby. Use this when the user asks which champion to play, wants draft help, or mentions champ select / pick-ban. The image is attached for this turn only. After reading lane, profile, allies, enemies, and bans, you must web-search current patch advice for that lane. Do not invent champions that are banned or already picked.";
+        "Capture the current desktop and attach the image so you can see what the user is looking at. Call this when they ask you to look, check, read, or analyze the screen, a window, an error, a clip, or League champ select. The image is for this turn only. Answer their actual question about the image; do not narrate unrelated windows or personal data. For League pick/draft help, also web-search current patch advice.";
 
-    internal const string SystemPrompt =
-        "\nLeague champ-select help: A screenshot of the user's desktop is attached because they asked for a League of Legends pick. Look at the champion select UI in the image: the user's assigned lane/role, their profile/hover, ally picks and hovers, enemy picks, and bans. Ignore unrelated windows. Then you MUST use web search for the current patch meta for that exact lane versus the visible threats. Suggest one main champion they can still pick and one backup. Stay in character, keep it short, and do not recommend banned or already-taken champions. If the screenshot is not champ select, say so and ask what lane they are on.";
+    internal const string LookPrompt =
+        "\nScreen look: A screenshot of the user's desktop is attached because they asked you to look at something. Study the image, focus on what they asked about, and answer in character. Keep it short. Do not recite unrelated windows, notifications, passwords, or personal data. If the image is unclear, say so.";
 
-    private static readonly Regex RequestCue = new(
+    internal const string LeaguePrompt =
+        "\nLeague champ-select help: A screenshot of the user's desktop is attached. Look at the champion select UI: the user's assigned lane/role, their profile/hover, ally picks and hovers, enemy picks, and bans. Ignore unrelated windows. Then you MUST use web search for the current patch meta for that exact lane versus the visible threats. Suggest one main champion they can still pick and one backup. Stay in character, keep it short, and do not recommend banned or already-taken champions. If the screenshot is not champ select, say so and ask what lane they are on.";
+
+    private static readonly Regex LookCue = new(
+        @"(?i)(?:olha(?:r)?|olhe|v[eê](?:ja)?)\s+(?:isso|isto|aqui|a[ií]|pra\s+(?:mim\s+)?(?:isso|aqui|tela)|a\s+tela|o\s+monitor|nesta|nessa|o\s+que)|"
+        + @"(?i)o\s+que\s+(?:tem|t[aá]|est[aá])\s+(?:na|no)\s+(?:tela|ecr[aã]|monitor|screen)|"
+        + @"(?i)(?:analisa(?:r)?|l[eê](?:r)?)\s+(?:isso|a\s+tela|a\s+imagem|o\s+print|o\s+erro)|"
+        + @"(?i)(?:tira(?:r)?|pega(?:r)?)\s+(?:um\s+)?(?:print|screenshot).{0,24}(?:v[eê]|diz|fala|olha|analisa)|"
+        + @"(?i)look\s+at\s+(?:this|that|it|my\s+screen|the\s+screen|the\s+monitor)|"
+        + @"(?i)(?:what\s+do\s+you\s+see|can\s+you\s+see\s+(?:this|that|my\s+screen)|check\s+(?:my\s+)?(?:screen|this)|what(?:'s|\s+is)\s+on\s+(?:my\s+)?screen)|"
+        + @"(?i)(?:看看|看一下|幫我看|帮我看).{0,8}(?:螢幕|屏幕|畫面|画面|這個|这个)|"
+        + @"(?i)(?:画面|スクリーン).{0,6}(?:見て|見てくれ|確認)",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex LeagueCue = new(
         @"(?i)\b(?:league(?:\s+of\s+legends)?|\blol\b|wild\s*rift|champ(?:ion)?\s*select|draft|pick(?:\/| )?ban|banphase)\b|"
         + @"(?i)\b(?:sugere|sugerir|indica|indicar|qual|which|what)\b.{0,40}\b(?:champ(?:ion)?s?|campe[aã]o(?:es)?|pick|ban)\b|"
         + @"(?i)\b(?:campe[aã]o|champion)\b.{0,24}\b(?:jogar|play|pick|pegar|escolher)\b|"
         + @"(?i)\b(?:minha\s+lane|my\s+lane|top(?:lane)?|jungle|jgl|mid(?:lane)?|adc|bot(?:lane)?|sup(?:port)?)\b.{0,32}\b(?:champ|campe[aã]o|pick|sugest)",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
-    internal static bool LooksLikeRequest(string? text)
-        => !string.IsNullOrWhiteSpace(text) && RequestCue.IsMatch(text.Trim());
+    internal static bool LooksLikeLookRequest(string? text)
+        => !string.IsNullOrWhiteSpace(text) && LookCue.IsMatch(text.Trim());
+
+    internal static bool LooksLikeLeagueRequest(string? text)
+        => !string.IsNullOrWhiteSpace(text) && LeagueCue.IsMatch(text.Trim());
+
+    internal static bool ShouldCapture(string? text)
+        => LooksLikeLookRequest(text) || LooksLikeLeagueRequest(text);
+
+    internal static bool ShouldWebSearch(string? text)
+        => LooksLikeLeagueRequest(text);
+
+    internal static string PromptFor(string? text)
+        => LooksLikeLeagueRequest(text) ? LeaguePrompt : LookPrompt;
+
+    internal static bool IsLookTool(string? name)
+        => string.Equals(name, ToolName, StringComparison.Ordinal)
+            || string.Equals(name, LegacyToolName, StringComparison.Ordinal);
 
     internal readonly record struct CaptureResult(bool Success, string PngPath, string JpegPath, string Error);
 
@@ -39,7 +70,7 @@ internal static class LeagueChampSelect
             Directory.CreateDirectory(directory);
             var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             var pngPath = Path.Combine(directory, $"Lilith_{stamp}.png");
-            var jpegPath = Path.Combine(directory, $"Lilith_{stamp}_draft.jpg");
+            var jpegPath = Path.Combine(directory, $"Lilith_{stamp}_look.jpg");
             var pngEscaped = pngPath.Replace("'", "''");
             var jpegEscaped = jpegPath.Replace("'", "''");
             var script =

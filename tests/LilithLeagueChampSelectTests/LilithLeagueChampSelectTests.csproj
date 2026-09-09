@@ -6,6 +6,6 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../src/LilithTextInjector/LeagueChampSelect.cs" Link="LeagueChampSelect.cs" />
+    <Compile Include="../../src/LilithTextInjector/ScreenLook.cs" Link="ScreenLook.cs" />
   </ItemGroup>
 </Project>
