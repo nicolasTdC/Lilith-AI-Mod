@@ -207,8 +207,8 @@ public sealed class Plugin : BasePlugin
         PortugueseVoiceReferencePath = Config.Bind("PortugueseVoice", "ReferencePath",
             Path.Combine(Paths.BepInExRootPath, "data", "LilithTextInjector", "voice", "pt"),
             "File or folder of Portuguese reference clips for XTTS. wav/mp3/ogg/flac are accepted.");
-        VoicePlaybackGain = Config.Bind("Voice", "PlaybackGain", 1f,
-            "Loudness of synthesized speech. 1 peak-normalizes to near full volume; 0.6 is quieter; values above 1 are extra boost with clipping protection.");
+        VoicePlaybackGain = Config.Bind("Voice", "PlaybackGain", 2f,
+            "Loudness of synthesized speech. 1 peak-normalizes to near full volume; 0.5 is quieter; values above 1 boost further (peaks clip at full scale). Change from the in-game Controls tab.");
         WeatherEnabled = Config.Bind("Weather", "Enabled", true,
             "Provide current Open-Meteo weather conditions to Lilith.");
         TestNoteOnce = Config.Bind("Notes", "CreateOneTestNote", false,
@@ -6466,10 +6466,10 @@ internal static class DialogueManagerUpdatePatch
         }
         if (peak < 1e-5f)
             return;
-        var target = Math.Min(0.95f * Math.Max(gain, 1f), 0.98f);
-        var scale = target / peak;
-        if (gain < 1f)
-            scale *= gain;
+        // 1.0 = peak-normalize to 0.95. Values above 1 multiply that, so 200% is
+        // actually twice as loud (peaks hard-clip at ±1). The previous formula
+        // capped extra boost at 0.98 and could not raise quiet XTTS clips.
+        var scale = 0.95f * gain / peak;
         if (Math.Abs(scale - 1f) < 0.02f)
             return;
         for (var i = 0; i < samples.Length; i++)
@@ -7553,9 +7553,15 @@ internal static class NewTraySettingsAdapter
     private static SettingSwitchItems? _voiceHotkeySwitch;
     private static TMP_Text? _voiceHotkeyOnValue;
     private static TMP_Text? _voiceHotkeyOffValue;
+    private static GameObject? _voiceVolumeRow;
+    private static SettingSwitchItems? _voiceVolumeSwitch;
+    private static TMP_Text? _voiceVolumeOnValue;
+    private static TMP_Text? _voiceVolumeOffValue;
     private static Il2CppSystem.Action<bool>? _advancedChanged;
     private static Il2CppSystem.Action<bool>? _textHotkeyClicked;
     private static Il2CppSystem.Action<bool>? _voiceHotkeyClicked;
+    private static Il2CppSystem.Action<bool>? _voiceVolumeClicked;
+    private static readonly float[] VoiceVolumeSteps = { 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f, 4f };
     private static bool _readyLogged;
     private static TraySettingNewView? _layoutLoggedView;
     private static float _nextScanAt;
@@ -7617,6 +7623,7 @@ internal static class NewTraySettingsAdapter
                 case TraySettingTab.Controls:
                     EnsureAdvancedActionsRow(view);
                     EnsureHotkeyRows(view);
+                    EnsureVoiceVolumeRow(view);
                     PlaceOriginalControlRows(view);
                     break;
             }
@@ -7695,6 +7702,37 @@ internal static class NewTraySettingsAdapter
         }
     }
 
+    private static void EnsureVoiceVolumeRow(TraySettingNewView view)
+    {
+        if (_voiceVolumeRow != null && _voiceVolumeSwitch != null)
+            return;
+        _voiceVolumeClicked = DelegateSupport.ConvertDelegate<Il2CppSystem.Action<bool>>(
+            new System.Action<bool>(increase => StepVoiceVolume(increase)));
+        (_voiceVolumeRow, _voiceVolumeSwitch, _voiceVolumeOnValue, _voiceVolumeOffValue) =
+            CreateHotkeyRow(view, "LilithModVoiceVolume", _voiceVolumeClicked!);
+    }
+
+    private static void StepVoiceVolume(bool increase)
+    {
+        var current = Math.Clamp(Plugin.VoicePlaybackGain.Value, VoiceVolumeSteps[0], VoiceVolumeSteps[^1]);
+        var index = 0;
+        var best = float.MaxValue;
+        for (var i = 0; i < VoiceVolumeSteps.Length; i++)
+        {
+            var distance = Math.Abs(VoiceVolumeSteps[i] - current);
+            if (distance >= best)
+                continue;
+            best = distance;
+            index = i;
+        }
+        index = Math.Clamp(index + (increase ? 1 : -1), 0, VoiceVolumeSteps.Length - 1);
+        Plugin.VoicePlaybackGain.Value = VoiceVolumeSteps[index];
+        Plugin.PluginLog.LogInfo($"TTS playback gain set to {VoiceVolumeSteps[index]:0.##} ({VoiceVolumePercent(VoiceVolumeSteps[index])}) from the settings UI.");
+    }
+
+    private static string VoiceVolumePercent(float gain)
+        => $"{Math.Clamp((int)Math.Round(gain * 100f), 20, 400)}%";
+
     private static (GameObject Row, SettingSwitchItems Item) CreateSwitchRow(
         TraySettingNewView view, string name, bool value, Il2CppSystem.Action<bool> callback)
     {
@@ -7772,9 +7810,11 @@ internal static class NewTraySettingsAdapter
         OverlayOnOfficialControlRow(_textHotkeyRow, textAnchor);
         OverlayOnOfficialControlRow(_voiceHotkeyRow, voiceAnchor);
         OverlayOnOfficialControlRow(_advancedRow, advancedAnchor);
+        OverlayBelowOfficialControlRow(_voiceVolumeRow, advancedAnchor);
         ConfigureLegacyColumnRow(view, _textHotkeySwitch, true, true);
         ConfigureLegacyColumnRow(view, _voiceHotkeySwitch, true, true);
         ConfigureLegacyColumnRow(view, _advancedSwitch, true, false);
+        ConfigureLegacyColumnRow(view, _voiceVolumeSwitch, true, true);
         if (_layoutLoggedView != view)
         {
             _layoutLoggedView = view;
@@ -7817,6 +7857,18 @@ internal static class NewTraySettingsAdapter
         rowRect.anchoredPosition = anchor.anchoredPosition;
         rowRect.localScale = anchor.localScale;
         rowRect.localRotation = anchor.localRotation;
+    }
+
+    private static void OverlayBelowOfficialControlRow(GameObject? row, RectTransform anchor)
+    {
+        OverlayOnOfficialControlRow(row, anchor);
+        if (row == null)
+            return;
+        var rowRect = row.GetComponent<RectTransform>();
+        if (rowRect == null)
+            return;
+        var height = Math.Max(anchor.rect.height, 36f);
+        rowRect.anchoredPosition = new Vector2(anchor.anchoredPosition.x, anchor.anchoredPosition.y - height);
     }
 
     private static void ConfigureLegacyColumnRow(
@@ -7898,6 +7950,7 @@ internal static class NewTraySettingsAdapter
             DialogueManagerUpdatePatch.LocalizedText("進階電腦操作", "高级电脑操作", "高度なPC操作", "Advanced PC controls"));
         RefreshHotkeyRow(_textHotkeySwitch, _textHotkeyOnValue, _textHotkeyOffValue, 1);
         RefreshHotkeyRow(_voiceHotkeySwitch, _voiceHotkeyOnValue, _voiceHotkeyOffValue, 2);
+        RefreshVoiceVolumeRow();
     }
 
     private static void RefreshSwitch(SettingSwitchItems? item, bool value, string label)
@@ -7929,6 +7982,24 @@ internal static class NewTraySettingsAdapter
             offValue.text = value;
     }
 
+    private static void RefreshVoiceVolumeRow()
+    {
+        if (_voiceVolumeSwitch == null)
+            return;
+        if (_voiceVolumeSwitch._currentValue)
+            _voiceVolumeSwitch.ApplyValue(false, false);
+        var percent = VoiceVolumePercent(Math.Clamp(Plugin.VoicePlaybackGain.Value, 0.2f, 4f));
+        var label = DialogueManagerUpdatePatch.LocalizedText(
+            $"語音音量 {percent}", $"语音音量 {percent}", $"音声音量 {percent}", $"Voice volume {percent}");
+        if (_voiceVolumeSwitch._nameText != null
+            && !string.Equals(_voiceVolumeSwitch._nameText.text, label, StringComparison.Ordinal))
+            _voiceVolumeSwitch._nameText.text = label;
+        if (_voiceVolumeOffValue != null)
+            _voiceVolumeOffValue.text = "−";
+        if (_voiceVolumeOnValue != null)
+            _voiceVolumeOnValue.text = "+";
+    }
+
     private static string BuildHotkeyValue(int target)
     {
         var waiting = DialogueManagerUpdatePatch.IsNewSettingsKeyBindingActive(target);
@@ -7957,6 +8028,10 @@ internal static class NewTraySettingsAdapter
         _voiceHotkeySwitch = null;
         _voiceHotkeyOnValue = null;
         _voiceHotkeyOffValue = null;
+        _voiceVolumeRow = null;
+        _voiceVolumeSwitch = null;
+        _voiceVolumeOnValue = null;
+        _voiceVolumeOffValue = null;
     }
 }
 
