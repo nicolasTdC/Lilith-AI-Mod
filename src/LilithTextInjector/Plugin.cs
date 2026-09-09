@@ -6321,17 +6321,93 @@ internal static class DialogueManagerUpdatePatch
     private static string BuildLocalTimeContext()
     {
         var now = DateTimeOffset.Now;
-        var weekday = now.DayOfWeek switch
+        var weekday = FormatWeekday(now.DayOfWeek);
+        DateTimeOffset? lastUserAt = null;
+        lock (MemoryLock)
         {
-            DayOfWeek.Monday => "星期一",
-            DayOfWeek.Tuesday => "星期二",
-            DayOfWeek.Wednesday => "星期三",
-            DayOfWeek.Thursday => "星期四",
-            DayOfWeek.Friday => "星期五",
-            DayOfWeek.Saturday => "星期六",
-            _ => "星期日"
-        };
-        return $"\n目前使用者電腦的本地日期與時間是 {now:yyyy-MM-dd HH:mm:ss}（{weekday}，UTC{now:zzz}）。這是可信的即時系統資訊；被問到時間、日期、星期或早晚時，直接依此自然回答。";
+            for (var i = RecentConversation.Count - 1; i >= 0; i--)
+            {
+                var turn = RecentConversation[i];
+                if (!string.Equals(turn.Role, "user", StringComparison.OrdinalIgnoreCase) || turn.At == null)
+                    continue;
+                lastUserAt = turn.At;
+                break;
+            }
+        }
+
+        var clock = $"\nThe user's local date and time right now is {now:yyyy-MM-dd HH:mm:ss} ({weekday}, UTC{now:zzz}). This is trusted live system time.";
+        if (lastUserAt != null)
+        {
+            var gap = now - lastUserAt.Value;
+            if (gap < TimeSpan.Zero)
+                gap = TimeSpan.Zero;
+            var gapText = gap.TotalHours >= 24
+                ? $"{gap.TotalDays:0.#} days"
+                : gap.TotalMinutes >= 60
+                    ? $"{gap.TotalHours:0.#} hours"
+                    : $"{Math.Max(0, (int)gap.TotalMinutes)} minutes";
+            clock += $" Their previous message was at {lastUserAt.Value:yyyy-MM-dd HH:mm:ss} ({gapText} ago).";
+            if (gap.TotalMinutes >= 20)
+                clock += " Time has passed; you may briefly notice that in character (they came back, it's later, they were gone a while). Do not read the clock aloud unless they asked or the gap matters.";
+            else
+                clock += " Do not announce the clock unless asked.";
+        }
+        else
+        {
+            clock += " If asked the time, date, weekday, or whether it is morning/night, answer from this clock naturally.";
+        }
+        return clock;
+    }
+
+    private static string FormatWeekday(DayOfWeek day)
+    {
+        try
+        {
+            var language = GetActiveReplyLanguage();
+            if (language.StartsWith("pt", StringComparison.OrdinalIgnoreCase))
+            {
+                return day switch
+                {
+                    DayOfWeek.Monday => "segunda-feira",
+                    DayOfWeek.Tuesday => "terça-feira",
+                    DayOfWeek.Wednesday => "quarta-feira",
+                    DayOfWeek.Thursday => "quinta-feira",
+                    DayOfWeek.Friday => "sexta-feira",
+                    DayOfWeek.Saturday => "sábado",
+                    _ => "domingo"
+                };
+            }
+            if (language.StartsWith("ja", StringComparison.OrdinalIgnoreCase))
+            {
+                return day switch
+                {
+                    DayOfWeek.Monday => "月曜日",
+                    DayOfWeek.Tuesday => "火曜日",
+                    DayOfWeek.Wednesday => "水曜日",
+                    DayOfWeek.Thursday => "木曜日",
+                    DayOfWeek.Friday => "金曜日",
+                    DayOfWeek.Saturday => "土曜日",
+                    _ => "日曜日"
+                };
+            }
+            if (language.StartsWith("zh", StringComparison.OrdinalIgnoreCase))
+            {
+                return day switch
+                {
+                    DayOfWeek.Monday => "星期一",
+                    DayOfWeek.Tuesday => "星期二",
+                    DayOfWeek.Wednesday => "星期三",
+                    DayOfWeek.Thursday => "星期四",
+                    DayOfWeek.Friday => "星期五",
+                    DayOfWeek.Saturday => "星期六",
+                    _ => "星期日"
+                };
+            }
+        }
+        catch
+        {
+        }
+        return day.ToString();
     }
 
     internal static void LoadPersonaOverlay()
@@ -7714,7 +7790,8 @@ internal static class DialogueManagerUpdatePatch
                 .Select(turn => new ChatTurn
                 {
                     Role = turn.Role ?? string.Empty,
-                    Text = turn.Text ?? string.Empty
+                    Text = turn.Text ?? string.Empty,
+                    At = turn.At
                 })
                 .ToList();
         }
@@ -7724,7 +7801,7 @@ internal static class DialogueManagerUpdatePatch
     {
         lock (MemoryLock)
         {
-            RecentConversation.Add(new ChatTurn { Role = role, Text = text });
+            RecentConversation.Add(new ChatTurn { Role = role, Text = text, At = DateTimeOffset.Now });
             while (RecentConversation.Count > MaxRememberedTurns)
                 RecentConversation.RemoveAt(0);
             try
@@ -7743,6 +7820,7 @@ internal static class DialogueManagerUpdatePatch
     {
         public string Role { get; set; } = string.Empty;
         public string Text { get; set; } = string.Empty;
+        public DateTimeOffset? At { get; set; }
     }
 
     private static string[] SplitIntoBubblePages(string text)

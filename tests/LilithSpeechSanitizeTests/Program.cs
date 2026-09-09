@@ -57,6 +57,8 @@ AssertEqual("um dois três,", SpeechTextSanitizer.Prepare("um dois tres!!"));
 AssertEqual("perfeito, da o play ai bei", SpeechTextSanitizer.Prepare("perfeitommm!!! da o play ai bae"));
 AssertEqual("oi tudo bem", SpeechTextSanitizer.Prepare("oi. tudo bem"));
 AssertEqual("perfeitamente", SpeechTextSanitizer.Prepare("perfeitamente"));
+AssertEqual("cara para, fui exposta", SpeechTextSanitizer.Prepare("JFLBQWEUOFBQOWUIEFNBQUWNFQOIWNE cara paraaaa kkkkkkkkkkkkkkkkkkkkkkkk fui exposta"));
+AssertEqual("\"do you want me tô meow\" SIM, miau,", SpeechTextSanitizer.Prepare("aspojkaspokasp kkkkkkkkkkkkkkkkkkkkkkkkkk \"do you want me to meow\" SIM kkkkkkkkkkkkk miau t-t"));
 
 var extra = Path.Combine(Path.GetTempPath(), "lilith-abreviations-test.json");
 File.WriteAllText(extra, "{\"tq\":\"tá quieto\",\"n\":\"não\"}");
@@ -67,7 +69,7 @@ if (count < 100)
 AssertEqual("tá quieto", SpeechTextSanitizer.Prepare("tq"));
 File.Delete(extra);
 
-Console.WriteLine("Lilith speech sanitize tests passed (61 assertions).");
+Console.WriteLine("Lilith speech sanitize tests passed (63 assertions).");
 
 static void AssertEqual(string expected, string actual)
 {

@@ -373,6 +373,12 @@ internal static class SpeechTextSanitizer
         var letterCount = 0;
         var kCount = 0;
         var smashHits = 0;
+        var mashHits = 0;
+        var jklqwe = 0;
+        var vowelCount = 0;
+        var unique = new HashSet<char>();
+        var maxConsonantRun = 0;
+        var consonantRun = 0;
         var prefix = new char[2];
         var prefixLen = 0;
         for (var i = start; i < end; i++)
@@ -382,21 +388,39 @@ internal static class SpeechTextSanitizer
                 continue;
             if (char.IsDigit(ch))
                 return false;
-            if (!IsSmashLetter(ch))
+            if (!IsLatinLetter(ch))
                 return false;
-            var lower = ch is >= 'A' and <= 'Z' ? (char)(ch + 32) : ch == 'Ç' ? 'ç' : ch;
+            var lower = ToLowerLatin(ch);
             if (letterCount < 2)
                 prefix[prefixLen++] = lower;
             letterCount++;
+            unique.Add(lower);
             if (lower == 'k')
                 kCount++;
             if (lower is 'k' or 'p' or 'd' or 'f' or 'h')
                 smashHits++;
+            if (lower is 'q' or 'w' or 'j' or 'l' or 'b' or 'g' or 'z' or 'x' or 'v' or 'n' or 'm')
+                mashHits++;
+            if (lower is 'j' or 'k' or 'q' or 'w')
+                jklqwe++;
+            if (IsSmashVowel(lower))
+            {
+                vowelCount++;
+                consonantRun = 0;
+            }
+            else
+            {
+                consonantRun++;
+                if (consonantRun > maxConsonantRun)
+                    maxConsonantRun = consonantRun;
+            }
         }
 
         if (letterCount < 5)
             return false;
         if (kCount >= letterCount - 1)
+            return true;
+        if (maxConsonantRun >= 4 && unique.Count >= 6 && jklqwe >= 2)
             return true;
         if (prefixLen == 2
             && ((prefix[0] == 'a' && prefix[1] is 's' or 'p' or 'u')
@@ -405,14 +429,24 @@ internal static class SpeechTextSanitizer
             && letterCount - 2 >= 3
             && (kCount > 0 || smashHits >= 2))
             return true;
+        var vowelRatio = vowelCount / (double)letterCount;
+        if (letterCount >= 9
+            && unique.Count >= 6
+            && mashHits + smashHits >= 4
+            && vowelRatio is >= 0.12 and <= 0.52
+            && jklqwe >= 2)
+            return true;
         return false;
     }
 
-    private static bool IsSmashLetter(char ch)
-    {
-        var lower = ch is >= 'A' and <= 'Z' ? (char)(ch + 32) : ch;
-        return lower is 'a' or 'u' or 'p' or 'o' or 'd' or 'k' or 's' or 'f' or 'h' or 'ç' or 'Ç';
-    }
+    private static bool IsLatinLetter(char ch)
+        => ch is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or 'ç' or 'Ç' or (>= 'À' and <= 'ÿ');
+
+    private static char ToLowerLatin(char ch)
+        => ch is >= 'A' and <= 'Z' ? (char)(ch + 32) : ch == 'Ç' ? 'ç' : ch;
+
+    private static bool IsSmashVowel(char lower)
+        => lower is 'a' or 'e' or 'i' or 'o' or 'u' or 'á' or 'é' or 'í' or 'ó' or 'ú' or 'â' or 'ê' or 'ô' or 'ã' or 'õ';
 
     private static bool IsWrappingPunct(char ch)
         => ch is '.' or ',' or '!' or '?' or ';' or ':' or '~' or '…' or '。' or '，' or '、' or '！' or '？' or '～' or '(' or ')' or '[' or ']' or '"' or '\'' or '“' or '”';
