@@ -513,6 +513,8 @@ internal static class DialogueManagerUpdatePatch
     private static bool _xttsMissingLogged;
     private static Process? _xttsProcess;
     private static float _youtubeMusicStartedAt = -999f;
+    private static float _youtubeMusicPlayNudgeAt = -1f;
+    private static int _youtubeMusicPlayNudgeTries;
     private static string _youtubeMusicLastQuery = string.Empty;
     private static IntPtr _apiKeyTrayPointer;
     private static bool _apiKeyDialogMode;
@@ -705,6 +707,7 @@ internal static class DialogueManagerUpdatePatch
         UpdateSettingsUiSafely();
         EnsureLocalVoiceHost();
         ObserveForegroundWindow();
+        ProcessYouTubeMusicPlayNudge();
         ProcessGeminiToolBatches();
         ProcessGeminiCompatibilityFallbacks();
         ProcessQwenToolBatches();
@@ -1578,6 +1581,8 @@ internal static class DialogueManagerUpdatePatch
         }
 
         _youtubeMusicStartedAt = Time.unscaledTime;
+        _youtubeMusicPlayNudgeAt = Time.unscaledTime + 2.4f;
+        _youtubeMusicPlayNudgeTries = 0;
         _youtubeMusicLastQuery = query ?? string.Empty;
         Plugin.PluginLog.LogInfo($"Opened YouTube Music ({intent}, queryChars={_youtubeMusicLastQuery.Length}).");
         reply = intent switch
@@ -1589,6 +1594,68 @@ internal static class DialogueManagerUpdatePatch
             _ => ApiKeyText($"好，幫你在 YouTube Music 播放「{result.Title}」。", $"好，帮你在 YouTube Music 播放“{result.Title}”。", $"うん、YouTube Musicで「{result.Title}」を再生するね。", $"Okay, playing {result.Title} on YouTube Music.")
         };
         return true;
+    }
+
+    private static void ProcessYouTubeMusicPlayNudge()
+    {
+        if (_youtubeMusicPlayNudgeAt < 0f || Time.unscaledTime < _youtubeMusicPlayNudgeAt)
+            return;
+        try
+        {
+            if (OperatingSystem.IsWindows())
+                NudgeYouTubeMusicPlay();
+        }
+        catch (Exception exception)
+        {
+            Plugin.PluginLog.LogWarning($"Could not auto-start YouTube Music playback: {exception.Message}");
+            _youtubeMusicPlayNudgeAt = -1f;
+            return;
+        }
+
+        _youtubeMusicPlayNudgeTries++;
+        if (_youtubeMusicPlayNudgeTries < 2)
+            _youtubeMusicPlayNudgeAt = Time.unscaledTime + 1.8f;
+        else
+            _youtubeMusicPlayNudgeAt = -1f;
+    }
+
+    private static void NudgeYouTubeMusicPlay()
+    {
+        const uint WmAppCommand = 0x0319;
+        const int AppCommandMediaPlay = 46;
+        var window = FindNewestBrowserWindow();
+        if (window == IntPtr.Zero)
+            window = GetForegroundWindow();
+        if (window == IntPtr.Zero)
+            return;
+        SetForegroundWindow(window);
+        SendMessage(window, WmAppCommand, window, (IntPtr)(AppCommandMediaPlay << 16));
+        Plugin.PluginLog.LogInfo("Sent MEDIA_PLAY to start YouTube Music after the page opened.");
+    }
+
+    private static IntPtr FindNewestBrowserWindow()
+    {
+        Process? newest = null;
+        foreach (var name in new[] { "chrome", "msedge", "brave", "firefox", "opera", "vivaldi" })
+        {
+            Process[] processes;
+            try { processes = Process.GetProcessesByName(name); }
+            catch { continue; }
+            foreach (var process in processes)
+            {
+                try
+                {
+                    if (process.MainWindowHandle == IntPtr.Zero)
+                        continue;
+                    if (newest == null || process.StartTime > newest.StartTime)
+                        newest = process;
+                }
+                catch
+                {
+                }
+            }
+        }
+        return newest?.MainWindowHandle ?? IntPtr.Zero;
     }
 
     private static GeminiToolResult ExecuteYouTubeMusicTool(
@@ -6788,6 +6855,9 @@ internal static class DialogueManagerUpdatePatch
 
     [DllImport("user32.dll")]
     private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();

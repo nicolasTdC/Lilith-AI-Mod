@@ -27,8 +27,14 @@ Assert(!YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic("estou cansado hoje"),
 Assert(!YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic("that playlist was nice"), "Mentioning a playlist must not start another one.");
 Assert(YouTubeMusicPlayback.UserAskedToChangeMusic("toca outra"), "Asking for another track should count as a change.");
 Assert(YouTubeMusicPlayback.LooksLikeGenericLofiQuery("lofi girl beats"), "Lofi queries should be recognized.");
+Assert(YouTubeMusicPlayback.WithAutoplay("https://music.youtube.com/watch?v=abc") == "https://music.youtube.com/watch?v=abc&autoplay=1",
+    "Watch URLs should request autoplay.");
+Assert(YouTubeMusicPlayback.WithAutoplay("https://music.youtube.com/playlist?list=LM").Contains("autoplay=1", StringComparison.Ordinal),
+    "Playlist URLs should request autoplay.");
+Assert(YouTubeMusicPlayback.WithAutoplay("https://music.youtube.com/watch?v=abc&autoplay=1") == "https://music.youtube.com/watch?v=abc&autoplay=1",
+    "Existing autoplay flags must not be duplicated.");
 
-Console.WriteLine("YouTube Music ID parsing tests passed (12 assertions).");
+Console.WriteLine("YouTube Music ID parsing tests passed (15 assertions).");
 
 static void Assert(bool condition, string message)
 {

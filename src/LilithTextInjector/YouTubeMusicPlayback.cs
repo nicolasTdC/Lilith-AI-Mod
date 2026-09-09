@@ -93,10 +93,20 @@ internal static class YouTubeMusicPlayback
         return PickBestHit(query, hits);
     }
 
+    internal static string WithAutoplay(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return url;
+        if (url.Contains("autoplay=", StringComparison.OrdinalIgnoreCase))
+            return url;
+        return url.Contains('?', StringComparison.Ordinal) ? url + "&autoplay=1" : url + "?autoplay=1";
+    }
+
     private static PlayResult Open(string url, string title)
     {
-        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-        return new PlayResult(true, url, title);
+        var playUrl = WithAutoplay(url);
+        Process.Start(new ProcessStartInfo(playUrl) { UseShellExecute = true });
+        return new PlayResult(true, playUrl, title);
     }
 
     private static JsonElement Search(string query, string? filter)
