@@ -1149,7 +1149,6 @@ internal static class DialogueManagerUpdatePatch
     {
         if (!WatchSession.IsActive)
             return;
-        ScreenLook.DeleteTemp(WatchSession.Current.TempPath);
         WatchSession.End();
         Plugin.PluginLog.LogInfo($"Watch session ended ({reason}).");
     }
@@ -1239,10 +1238,9 @@ internal static class DialogueManagerUpdatePatch
         WatchSession.NoteCapture(now, capture.Hash);
         if (!WatchSession.ShouldComment(now, commentSeconds, changed))
             return;
-        if (!ScreenLook.TryWriteTemp(capture.Png, out var path))
+        if (!ScreenLook.TryWriteWatchCapture(capture.Png, out var path))
             return;
 
-        ScreenLook.DeleteTemp(WatchSession.Current.TempPath == path ? null : WatchSession.Current.TempPath);
         WatchSession.Current.TempPath = path;
         var firstLook = WatchSession.Current.FirstLookPending;
         WatchSession.NoteComment(now);
@@ -5459,7 +5457,7 @@ internal static class DialogueManagerUpdatePatch
         if (!ScreenLook.IsWindowUsable(hwnd))
             return null;
         var capture = ScreenLook.CaptureWindow(hwnd);
-        if (!capture.Success || !ScreenLook.TryWriteTemp(capture.Png, out var path))
+        if (!capture.Success || !ScreenLook.TryWriteWatchCapture(capture.Png, out var path))
             return null;
         if (!string.IsNullOrWhiteSpace(capture.Title))
             WatchSession.Current.WindowTitle = capture.Title;

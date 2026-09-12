@@ -122,21 +122,17 @@ internal static class ScreenLook
         return data.Length > 0;
     }
 
-    internal static string WatchTempPath()
-        => Path.Combine(Path.GetTempPath(), "lilith-watch-session.png");
-
-    internal static void DeleteTemp(string? path)
+    internal static bool TryWriteWatchCapture(byte[] png, out string path)
     {
-        if (string.IsNullOrWhiteSpace(path))
-            return;
-        try { File.Delete(path); } catch { }
-    }
-
-    internal static bool TryWriteTemp(byte[] png, out string path)
-    {
-        path = WatchTempPath();
+        path = string.Empty;
+        if (png == null || png.Length == 0)
+            return false;
         try
         {
+            var directory = ScreenshotDirectory();
+            Directory.CreateDirectory(directory);
+            var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+            path = Path.Combine(directory, $"Lilith_watch_{stamp}.png");
             File.WriteAllBytes(path, png);
             return File.Exists(path) && new FileInfo(path).Length > 0;
         }
