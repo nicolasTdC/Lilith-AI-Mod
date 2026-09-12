@@ -118,6 +118,9 @@ public sealed class Plugin : BasePlugin
     internal static ConfigEntry<string> LeagueDraftProject = null!;
     internal static ConfigEntry<bool> CodexBridgeEnabled = null!;
     internal static ConfigEntry<bool> CodexBridgeVoiceEnabled = null!;
+    internal static ConfigEntry<int> WatchSessionDurationMinutes = null!;
+    internal static ConfigEntry<int> WatchSessionCaptureSeconds = null!;
+    internal static ConfigEntry<int> WatchSessionCommentSeconds = null!;
 
     public override void Load()
     {
@@ -271,6 +274,12 @@ public sealed class Plugin : BasePlugin
             "Show local Codex lifecycle status through Lilith. No prompt text, API key, or Codex login data is read.");
         CodexBridgeVoiceEnabled = Config.Bind("CodexBridge", "VoiceEnabled", true,
             "Speak the important Codex lifecycle messages (started, approval required, and completed).");
+        WatchSessionDurationMinutes = Config.Bind("WatchSession", "DurationMinutes", WatchSession.DefaultDurationMinutes,
+            "How long an opt-in watch session lasts (1-30 minutes) unless the user stops it or the PC locks.");
+        WatchSessionCaptureSeconds = Config.Bind("WatchSession", "CaptureSeconds", WatchSession.DefaultCaptureSeconds,
+            "How often to screenshot the watched window during a session (2-30 seconds). Unchanged frames are skipped.");
+        WatchSessionCommentSeconds = Config.Bind("WatchSession", "CommentSeconds", WatchSession.DefaultCommentSeconds,
+            "Minimum seconds between unsolicited watch comments (15-180). Capture can be faster; she stays quiet if nothing changed.");
         MigrateKnownMojibakeDefaults();
         DialogueManagerUpdatePatch.LoadPersonaOverlay();
         DialogueManagerUpdatePatch.LoadMemory();
@@ -744,6 +753,7 @@ internal static class DialogueManagerUpdatePatch
         ObserveCurrentNativeNode(__instance);
         PollCodexBridgeEvents();
         ProcessPendingCodexSignal(__instance);
+        ProcessWatchSession(__instance);
         if (!_nativeDatabaseDumpCompleted)
             TryDumpNativeDialogueDatabases(__instance);
         if (!_localizedLineDatabasesDumped)
@@ -968,6 +978,8 @@ internal static class DialogueManagerUpdatePatch
             return;
         }
         UpdatePendingAiNoteEvents(submitted);
+        if (TryHandleWatchSessionCommand(manager, submitted))
+            return;
         var activeProvider = NormalizeAiProvider(Plugin.AiProvider.Value);
         var useModelComputerTools = (string.Equals(activeProvider, "Gemini", StringComparison.Ordinal)
                 || string.Equals(activeProvider, "Qwen", StringComparison.Ordinal))
@@ -1043,6 +1055,199 @@ internal static class DialogueManagerUpdatePatch
             _ = RequestGeminiAsync(submitted, playerName, CapturePoseContext());
         }
         Plugin.PluginLog.LogInfo($"Submitted AI input ({submitted.Length} chars).");
+    }
+
+    private static bool TryHandleWatchSessionCommand(DialogueManager manager, string submitted)
+    {
+        var stop = WatchSession.LooksLikeStop(submitted);
+        var start = WatchSession.LooksLikeStart(submitted);
+        if (!stop && !start)
+            return false;
+
+        if (stop)
+        {
+            if (!WatchSession.IsActive)
+            {
+                SpeakLocalWatchReply(manager,
+                    "Não estou olhando a tela agora.",
+                    "我現在沒有在看螢幕。",
+                    "我现在没有在看屏幕。",
+                    "今は画面を見ていないよ。",
+                    "I'm not watching the screen right now.");
+                return true;
+            }
+            EndWatchSession("user");
+            NoteWatchTogether(submitted);
+            AddMemoryTurn("user", submitted);
+            SpeakLocalWatchReply(manager,
+                "Ok, parei de olhar.",
+                "好，我先不看螢幕了。",
+                "好，我先不看屏幕了。",
+                "うん、画面を見るのはやめるね。",
+                "Okay, I stopped looking.");
+            return true;
+        }
+
+        var provider = NormalizeAiProvider(Plugin.AiProvider.Value);
+        if (provider is not "Gemini" and not "Qwen")
+        {
+            SpeakLocalWatchReply(manager,
+                "Pra eu ficar olhando a tela precisa ser Gemini ou Qwen.",
+                "一起看螢幕需要使用 Gemini 或千問。",
+                "一起看屏幕需要使用 Gemini 或千问。",
+                "画面を見続けるにはGeminiか千問が必要だよ。",
+                "Watching the screen with you needs Gemini or Qwen.");
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(GetActiveChatApiKey()))
+        {
+            manager.ForceSay(ApiKeyText("還沒有設定目前模型的 API Key。", "还没有设置当前模型的 API Key。", "現在のモデルのAPIキーがまだ設定されていないよ。", "The current model does not have an API key yet."), string.Empty, 6f);
+            return true;
+        }
+
+        var hwnd = GetControllableWindow();
+        var title = ScreenLook.WindowTitle(hwnd);
+        var minutes = WatchSession.ClampDurationMinutes(Plugin.WatchSessionDurationMinutes.Value);
+        WatchSession.Begin(hwnd.ToInt64(), title, DateTimeOffset.Now, minutes);
+        NoteWatchTogether(submitted);
+        AddMemoryTurn("user", submitted);
+        var windowBit = string.IsNullOrWhiteSpace(title)
+            ? string.Empty
+            : " (" + title + ")";
+        var started = CompanionText(
+            $"Tá, tô olhando a tela com você{windowBit}. Pede pra eu parar, ou eu solto daqui a {minutes} minutos.",
+            $"好，我陪你看螢幕{windowBit}。叫我停，或 {minutes} 分鐘後我會自己停。",
+            $"好，我陪你看屏幕{windowBit}。叫我停，或 {minutes} 分钟后我会自己停。",
+            $"うん、画面を一緒に見るね{windowBit}。止めてと言ってくれればやめるし、{minutes}分で自動的に終わるよ。",
+            $"Okay, I'm watching the screen with you{windowBit}. Tell me to stop, or I'll stop in {minutes} minutes.");
+        AddMemoryTurn("model", started);
+        _requestInFlight = true;
+        QueueAiReplyWithVoice(started, started, poseStyle: CapturePoseContext().VoiceStyle);
+        Plugin.PluginLog.LogInfo($"Watch session started for {minutes} min; window='{title}'.");
+        return true;
+    }
+
+    private static void SpeakLocalWatchReply(
+        DialogueManager manager,
+        string portuguese,
+        string traditional,
+        string simplified,
+        string japanese,
+        string english)
+    {
+        var reply = CompanionText(portuguese, traditional, simplified, japanese, english);
+        AddMemoryTurn("model", reply);
+        _requestInFlight = true;
+        QueueAiReplyWithVoice(reply, reply, poseStyle: CapturePoseContext().VoiceStyle);
+    }
+
+    private static string CompanionText(string portuguese, string traditional, string simplified, string japanese, string english)
+        => IsPortugueseInterface() ? portuguese : ApiKeyText(traditional, simplified, japanese, english);
+
+    private static void EndWatchSession(string reason)
+    {
+        if (!WatchSession.IsActive)
+            return;
+        ScreenLook.DeleteTemp(WatchSession.Current.TempPath);
+        WatchSession.End();
+        Plugin.PluginLog.LogInfo($"Watch session ended ({reason}).");
+    }
+
+    private static bool IsWatchSpeechBusy()
+        => _requestInFlight
+            || !PendingReplies.IsEmpty
+            || _delayedSpeechAudio != null
+            || !PendingVoiceAudio.IsEmpty
+            || (_voicePitchResetAt >= 0f && Time.unscaledTime < _voicePitchResetAt);
+
+    private static bool IsWorkstationLocked()
+    {
+        if (!OperatingSystem.IsWindows())
+            return false;
+        const uint desktopSwitchDesktop = 0x0100;
+        var desktop = OpenInputDesktop(0, true, desktopSwitchDesktop);
+        if (desktop == IntPtr.Zero)
+            return true;
+        CloseDesktop(desktop);
+        return false;
+    }
+
+    private static void ProcessWatchSession(DialogueManager manager)
+    {
+        if (!WatchSession.IsActive)
+            return;
+        var now = DateTimeOffset.Now;
+        if (IsWorkstationLocked())
+        {
+            EndWatchSession("lock");
+            if (!IsWatchSpeechBusy())
+                SpeakLocalWatchReply(manager,
+                    "A tela travou, então parei de olhar.",
+                    "螢幕鎖定了，所以我先不看了。",
+                    "屏幕锁定了，所以我先不看了。",
+                    "画面がロックされたから、見るのをやめたよ。",
+                    "The screen locked, so I stopped looking.");
+            return;
+        }
+        if (WatchSession.IsExpired(now))
+        {
+            EndWatchSession("timeout");
+            if (!IsWatchSpeechBusy())
+                SpeakLocalWatchReply(manager,
+                    "O tempo de olhar a tela acabou. Se quiser, pede de novo.",
+                    "一起看螢幕的時間到了。想繼續的話再叫我一聲。",
+                    "一起看屏幕的时间到了。想继续的话再叫我一声。",
+                    "画面を見る時間になったよ。続きが欲しかったらまた言ってね。",
+                    "The watch session ended. Ask me again if you want me to keep looking.");
+            return;
+        }
+
+        var hwnd = new IntPtr(WatchSession.Current.WindowHandle);
+        if (!ScreenLook.IsWindowUsable(hwnd))
+        {
+            hwnd = GetControllableWindow();
+            WatchSession.Current.WindowHandle = hwnd.ToInt64();
+            WatchSession.Current.WindowTitle = ScreenLook.WindowTitle(hwnd);
+            if (!ScreenLook.IsWindowUsable(hwnd))
+                return;
+        }
+
+        if (IsWatchSpeechBusy() || manager.IsBusy)
+            return;
+        var provider = NormalizeAiProvider(Plugin.AiProvider.Value);
+        if (provider is not "Gemini" and not "Qwen")
+            return;
+
+        var captureSeconds = WatchSession.ClampCaptureSeconds(Plugin.WatchSessionCaptureSeconds.Value);
+        var commentSeconds = WatchSession.ClampCommentSeconds(Plugin.WatchSessionCommentSeconds.Value);
+        if (!WatchSession.ShouldCapture(now, captureSeconds))
+            return;
+
+        var capture = ScreenLook.CaptureWindow(hwnd);
+        if (!capture.Success)
+        {
+            Plugin.PluginLog.LogWarning($"Watch session capture failed: {capture.Error}");
+            WatchSession.Current.LastCaptureAt = now;
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(capture.Title))
+            WatchSession.Current.WindowTitle = capture.Title;
+
+        var changed = !WatchSession.Current.HasHash
+            || !ScreenLook.IsSimilarFrame(WatchSession.Current.LastHash, capture.Hash);
+        WatchSession.NoteCapture(now, capture.Hash);
+        if (!WatchSession.ShouldComment(now, commentSeconds, changed))
+            return;
+        if (!ScreenLook.TryWriteTemp(capture.Png, out var path))
+            return;
+
+        ScreenLook.DeleteTemp(WatchSession.Current.TempPath == path ? null : WatchSession.Current.TempPath);
+        WatchSession.Current.TempPath = path;
+        var firstLook = WatchSession.Current.FirstLookPending;
+        WatchSession.NoteComment(now);
+        _requestInFlight = true;
+        _ = RequestWatchGlanceAsync(path, firstLook, WatchSession.Current.WindowTitle);
     }
 
     private static bool TryHandleScreenshotCommand(string text, out string reply)
@@ -5240,6 +5445,97 @@ internal static class DialogueManagerUpdatePatch
         return null;
     }
 
+    private static string? TryCaptureWatchSessionImage()
+    {
+        if (!WatchSession.IsActive)
+            return null;
+        var hwnd = new IntPtr(WatchSession.Current.WindowHandle);
+        if (!ScreenLook.IsWindowUsable(hwnd))
+        {
+            hwnd = GetControllableWindow();
+            WatchSession.Current.WindowHandle = hwnd.ToInt64();
+            WatchSession.Current.WindowTitle = ScreenLook.WindowTitle(hwnd);
+        }
+        if (!ScreenLook.IsWindowUsable(hwnd))
+            return null;
+        var capture = ScreenLook.CaptureWindow(hwnd);
+        if (!capture.Success || !ScreenLook.TryWriteTemp(capture.Png, out var path))
+            return null;
+        if (!string.IsNullOrWhiteSpace(capture.Title))
+            WatchSession.Current.WindowTitle = capture.Title;
+        WatchSession.Current.TempPath = path;
+        WatchSession.NoteCapture(DateTimeOffset.Now, capture.Hash);
+        return path;
+    }
+
+    private static async Task RequestWatchGlanceAsync(string imagePath, bool firstLook, string windowTitle)
+    {
+        try
+        {
+            var japaneseVoiceMode = IsJapaneseVoiceMode();
+            var interfaceLanguage = GetAiInterfaceLanguage();
+            var overlay = _personaOverlay;
+            var recap = WatchTogether.IsActive && WatchTogether.Active != null
+                ? WatchTogether.FormatLabel(WatchTogether.Active)
+                : null;
+            var systemInstruction = overlay.ResolvePersona(Plugin.PersonaPrompt.Value)
+                + "\n角色事實：" + overlay.ResolveLore(Plugin.CharacterLore.Value)
+                + "\n情緒表達：" + overlay.ResolveEmotion(Plugin.EmotionGuidance.Value)
+                + BuildLocalTimeContext()
+                + $"\n語言規則：目前遊戲介面語言是{interfaceLanguage.Name}。無論使用者輸入哪種語言，氣泡顯示內容都必須使用{interfaceLanguage.Name}。每次回答必須完成最後一句。{interfaceLanguage.ExtraRule}"
+                + WatchSession.GlancePrompt(firstLook, windowTitle, recap)
+                + ScreenLook.ImageAttachedPrompt;
+            var poseContext = CapturePoseContext();
+            var provider = NormalizeAiProvider(Plugin.AiProvider.Value);
+            if (string.Equals(provider, "Qwen", StringComparison.Ordinal))
+            {
+                await RequestQwenResponsesAsync(systemInstruction, WatchSession.GlanceMarker, poseContext, japaneseVoiceMode,
+                    useWebSearch: false, forceWebSearch: false, desktopToolsEnabled: false,
+                    imagePath, null).ConfigureAwait(false);
+                return;
+            }
+            var model = Uri.EscapeDataString(Plugin.GeminiModel.Value.Trim());
+            var url = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent";
+            var contents = BuildGeminiContents();
+            if (ScreenLook.TryReadImageBase64(imagePath, out var mimeType, out var imageData))
+            {
+                contents.Add(new
+                {
+                    role = "user",
+                    parts = new object[]
+                    {
+                        new Dictionary<string, object> { ["text"] = "A screenshot of the watched window is attached." },
+                        new Dictionary<string, object>
+                        {
+                            ["inline_data"] = new Dictionary<string, object>
+                            {
+                                ["mime_type"] = mimeType,
+                                ["data"] = imageData
+                            }
+                        }
+                    }
+                });
+            }
+            var session = new GeminiAgentSession
+            {
+                Url = url,
+                SystemInstruction = systemInstruction,
+                UserText = WatchSession.GlanceMarker,
+                PoseContext = poseContext,
+                JapaneseVoiceMode = japaneseVoiceMode,
+                UseGoogleSearch = false,
+                DesktopToolsEnabled = false,
+                Contents = contents.Cast<object>().ToList()
+            };
+            await SendGeminiAgentRequestAsync(session).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            Plugin.PluginLog.LogWarning($"Watch session glance failed: {exception.Message}");
+            _requestInFlight = false;
+        }
+    }
+
     private static async Task RequestGeminiAsync(string userText, string playerName, PoseContext poseContext)
     {
         GeminiAgentSession? agentSession = null;
@@ -5252,9 +5548,14 @@ internal static class DialogueManagerUpdatePatch
             var leagueHelp = ScreenLook.LooksLikeLeagueRequest(userText);
             var leagueBrief = leagueHelp ? LeagueDraft.TryReadBrief() : string.Empty;
             var screenLook = ScreenLook.ShouldCapture(userText) && string.IsNullOrWhiteSpace(leagueBrief);
-            var screenCapture = screenLook ? ScreenLook.CaptureDesktop() : default;
+            var watchImagePath = TryCaptureWatchSessionImage();
+            var screenCapture = string.IsNullOrWhiteSpace(watchImagePath) && screenLook
+                ? ScreenLook.CaptureDesktop()
+                : default;
+            var attachedImage = watchImagePath
+                ?? (screenCapture.Success ? screenCapture.JpegPath : null);
             var contents = BuildGeminiContents(
-                screenCapture.Success ? screenCapture.JpegPath : null,
+                attachedImage,
                 string.IsNullOrWhiteSpace(leagueBrief) ? null : leagueBrief);
             var nameContext = BuildPlayerNameContext(userText, playerName);
             var timeContext = BuildLocalTimeContext();
@@ -5279,10 +5580,17 @@ internal static class DialogueManagerUpdatePatch
             else if (string.Equals(activeProvider, "Qwen", StringComparison.Ordinal))
                 systemInstruction += "\nA web-search tool is available. Use it whenever the answer materially depends on recent or changeable facts such as news, current people or policies, prices, weather, schedules, software/model versions, service availability, or product features. Do not search for casual conversation, roleplay, personal advice, or stable facts.";
             systemInstruction += WatchTogether.BuildPrompt();
+            if (WatchSession.IsActive)
+                systemInstruction += WatchSession.ActiveChatPrompt(WatchSession.Current.WindowTitle);
             if (!string.IsNullOrWhiteSpace(leagueBrief))
             {
                 systemInstruction += "\nLeague draft text is attached from the live League client. Trust that list for who is in which lane, who is picked/hovered, and bans. Do not guess champions from a screenshot. You may web-search current patch advice for the user's lane versus those threats.";
                 Plugin.PluginLog.LogInfo($"Attached live League champ-select brief ({leagueBrief.Length} chars).");
+            }
+            else if (!string.IsNullOrWhiteSpace(watchImagePath))
+            {
+                systemInstruction += ScreenLook.ImageAttachedPrompt;
+                Plugin.PluginLog.LogInfo($"Attached the watched window so Lilith can see ({Path.GetFileName(watchImagePath)}).");
             }
             else if (screenLook)
             {
@@ -5309,7 +5617,7 @@ internal static class DialogueManagerUpdatePatch
             {
                 await RequestQwenResponsesAsync(systemInstruction, userText, poseContext, japaneseVoiceMode,
                     useWebSearch: true, forceWebSearch: useGoogleSearch, desktopToolsEnabled,
-                    screenCapture.Success ? screenCapture.JpegPath : null,
+                    attachedImage,
                     string.IsNullOrWhiteSpace(leagueBrief) ? null : leagueBrief).ConfigureAwait(false);
                 return;
             }
@@ -5794,7 +6102,10 @@ internal static class DialogueManagerUpdatePatch
 
     private static GeminiToolResult ExecuteLookAtScreenTool(GeminiFunctionCallData call, string userText)
     {
-        var capture = ScreenLook.CaptureDesktop();
+        var watchPath = TryCaptureWatchSessionImage();
+        var capture = string.IsNullOrWhiteSpace(watchPath)
+            ? ScreenLook.CaptureDesktop()
+            : new ScreenLook.CaptureResult(true, watchPath, watchPath, string.Empty);
         if (!capture.Success)
         {
             Plugin.PluginLog.LogWarning($"look_at_screen failed: {capture.Error}");
@@ -5901,6 +6212,7 @@ internal static class DialogueManagerUpdatePatch
         List<ChatTurn> snapshot;
         lock (MemoryLock)
             snapshot = new List<ChatTurn>(RecentConversation);
+        var attachedImage = false;
         for (var i = 0; i < snapshot.Count; i++)
         {
             var turn = snapshot[i];
@@ -5912,6 +6224,7 @@ internal static class DialogueManagerUpdatePatch
                 && role == "user"
                 && ScreenLook.TryReadImageBase64(leagueImagePath ?? string.Empty, out var mimeType, out var imageData))
             {
+                attachedImage = true;
                 input.Add(new
                 {
                     role,
@@ -5930,6 +6243,26 @@ internal static class DialogueManagerUpdatePatch
             {
                 input.Add(new { role, content = text });
             }
+        }
+        if (!attachedImage
+            && ScreenLook.TryReadImageBase64(leagueImagePath ?? string.Empty, out var glanceMime, out var glanceData))
+        {
+            var glanceText = string.IsNullOrWhiteSpace(extraText)
+                ? "A screenshot of the watched window is attached."
+                : extraText;
+            input.Add(new
+            {
+                role = "user",
+                content = new object[]
+                {
+                    new { type = "input_text", text = glanceText },
+                    new
+                    {
+                        type = "input_image",
+                        image_url = $"data:{glanceMime};base64,{glanceData}"
+                    }
+                }
+            });
         }
         return input;
     }
@@ -6204,9 +6537,15 @@ internal static class DialogueManagerUpdatePatch
         var bilingual = japaneseVoiceMode ? ParseBilingualReply(rawReply) : null;
         var reply = CleanReply(bilingual?.DisplayText ?? rawReply);
         var japaneseSpeech = bilingual?.JapaneseSpeech ?? string.Empty;
+        if (WatchSession.IsGlanceTurn(userText) && WatchSession.IsSilentReply(reply))
+        {
+            _requestInFlight = false;
+            Plugin.PluginLog.LogInfo("Watch session glance stayed silent.");
+            return;
+        }
         if (reply.Length > 0)
             AddMemoryTurn("model", reply);
-        if (reply.Length > 0)
+        if (reply.Length > 0 && !WatchSession.IsGlanceTurn(userText))
             ConsiderAiNoteEvent(userText, reply);
         PendingAiEmotions.Enqueue(ChooseAiEmotion(userText, reply, poseContext));
         var pages = SplitIntoBubblePages(reply.Length > 0 ? reply : "……");
@@ -7517,6 +7856,12 @@ internal static class DialogueManagerUpdatePatch
 
     [DllImport("user32.dll")]
     private static extern bool LockWorkStation();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint desiredAccess);
+
+    [DllImport("user32.dll")]
+    private static extern bool CloseDesktop(IntPtr desktop);
 
     [DllImport("kernel32.dll")]
     private static extern bool GetSystemPowerStatus(out SystemPowerStatus status);

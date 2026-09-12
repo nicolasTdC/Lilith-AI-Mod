@@ -94,6 +94,8 @@ internal static class ScreenLook
         }
     }
 
+    internal readonly record struct MemoryCapture(bool Success, byte[] Png, ulong Hash, string Title, string Error);
+
     internal static bool TryReadImageBase64(string path, out string mimeType, out string data)
     {
         mimeType = "image/png";
@@ -102,20 +104,136 @@ internal static class ScreenLook
             return false;
         try
         {
-            var bytes = File.ReadAllBytes(path);
-            if (bytes.Length == 0 || bytes.Length > 6_000_000)
-                return false;
-            mimeType = path.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
-                || path.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase)
-                ? "image/jpeg"
-                : "image/png";
-            data = Convert.ToBase64String(bytes);
-            return data.Length > 0;
+            return TryReadImageBase64(File.ReadAllBytes(path), out mimeType, out data);
         }
         catch
         {
             return false;
         }
+    }
+
+    internal static bool TryReadImageBase64(byte[] png, out string mimeType, out string data)
+    {
+        mimeType = "image/png";
+        data = string.Empty;
+        if (png == null || png.Length == 0 || png.Length > 6_000_000)
+            return false;
+        data = Convert.ToBase64String(png);
+        return data.Length > 0;
+    }
+
+    internal static string WatchTempPath()
+        => Path.Combine(Path.GetTempPath(), "lilith-watch-session.png");
+
+    internal static void DeleteTemp(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+        try { File.Delete(path); } catch { }
+    }
+
+    internal static bool TryWriteTemp(byte[] png, out string path)
+    {
+        path = WatchTempPath();
+        try
+        {
+            File.WriteAllBytes(path, png);
+            return File.Exists(path) && new FileInfo(path).Length > 0;
+        }
+        catch
+        {
+            path = string.Empty;
+            return false;
+        }
+    }
+
+    internal static bool IsWindowUsable(IntPtr hwnd)
+        => hwnd != IntPtr.Zero && IsWindow(hwnd) && IsWindowVisible(hwnd) && !IsIconic(hwnd);
+
+    internal static string WindowTitle(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+            return string.Empty;
+        try
+        {
+            var length = GetWindowTextLength(hwnd);
+            if (length <= 0)
+                return string.Empty;
+            var builder = new StringBuilder(length + 1);
+            GetWindowText(hwnd, builder, builder.Capacity);
+            return builder.ToString().Trim();
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    internal static MemoryCapture CaptureWindow(IntPtr hwnd, int maxWidth = 1280)
+    {
+        if (!IsWindowUsable(hwnd))
+            return new MemoryCapture(false, Array.Empty<byte>(), 0, string.Empty, "Watched window is gone or minimized.");
+        if (!TryGetWindowBounds(hwnd, out var left, out var top, out var width, out var height))
+            return new MemoryCapture(false, Array.Empty<byte>(), 0, WindowTitle(hwnd), "Could not read the window bounds.");
+        if (!TryCaptureRegion(left, top, width, height, maxWidth, null, out var png, out var hash, out var error))
+            return new MemoryCapture(false, Array.Empty<byte>(), 0, WindowTitle(hwnd), error);
+        return new MemoryCapture(true, png, hash, WindowTitle(hwnd), string.Empty);
+    }
+
+    internal static int HammingDistance(ulong a, ulong b)
+    {
+        var x = a ^ b;
+        var count = 0;
+        while (x != 0)
+        {
+            x &= x - 1;
+            count++;
+        }
+        return count;
+    }
+
+    internal static bool IsSimilarFrame(ulong a, ulong b, int maxDistance = 4)
+        => HammingDistance(a, b) <= maxDistance;
+
+    internal static ulong AverageHash(byte[] bgra, int width, int height)
+    {
+        if (bgra == null || width <= 0 || height <= 0)
+            return 0;
+        var cells = new float[64];
+        var cellW = Math.Max(1, width / 8);
+        var cellH = Math.Max(1, height / 8);
+        for (var cy = 0; cy < 8; cy++)
+        {
+            for (var cx = 0; cx < 8; cx++)
+            {
+                var x0 = cx * cellW;
+                var y0 = cy * cellH;
+                var x1 = cx == 7 ? width : Math.Min(width, x0 + cellW);
+                var y1 = cy == 7 ? height : Math.Min(height, y0 + cellH);
+                long sum = 0;
+                var n = 0;
+                for (var y = y0; y < y1; y++)
+                {
+                    var row = y * width * 4;
+                    for (var x = x0; x < x1; x++)
+                    {
+                        var i = row + x * 4;
+                        if (i + 2 >= bgra.Length)
+                            continue;
+                        sum += (bgra[i] * 19 + bgra[i + 1] * 183 + bgra[i + 2] * 54) >> 8;
+                        n++;
+                    }
+                }
+                cells[cy * 8 + cx] = n == 0 ? 0 : sum / (float)n;
+            }
+        }
+        ulong hash = 0;
+        for (var i = 0; i < 64; i++)
+        {
+            if (cells[i] >= 128f)
+                hash |= 1UL << i;
+        }
+        return hash;
     }
 
     private static string ScreenshotDirectory()
@@ -136,14 +254,44 @@ internal static class ScreenLook
 
     private static bool TryCaptureWithGdi(string pngPath, out string error)
     {
-        error = string.Empty;
         var left = GetSystemMetrics(SmXvirtualscreen);
         var top = GetSystemMetrics(SmYvirtualscreen);
         var width = GetSystemMetrics(SmCxvirtualscreen);
         var height = GetSystemMetrics(SmCyvirtualscreen);
+        return TryCaptureRegion(left, top, width, height, 1280, pngPath, out _, out _, out error);
+    }
+
+    private static bool TryGetWindowBounds(IntPtr hwnd, out int left, out int top, out int width, out int height)
+    {
+        left = top = width = height = 0;
+        var rect = new WinRect();
+        if (DwmGetWindowAttribute(hwnd, DwmwaExtendedFrameBounds, out rect, Marshal.SizeOf<WinRect>()) != 0
+            && !GetWindowRect(hwnd, out rect))
+            return false;
+        left = rect.Left;
+        top = rect.Top;
+        width = rect.Right - rect.Left;
+        height = rect.Bottom - rect.Top;
+        return width > 8 && height > 8;
+    }
+
+    private static bool TryCaptureRegion(
+        int left,
+        int top,
+        int width,
+        int height,
+        int maxWidth,
+        string? pngPath,
+        out byte[] png,
+        out ulong hash,
+        out string error)
+    {
+        png = Array.Empty<byte>();
+        hash = 0;
+        error = string.Empty;
         if (width <= 0 || height <= 0)
         {
-            error = $"Virtual screen size was invalid ({width}x{height}).";
+            error = $"Capture size was invalid ({width}x{height}).";
             return false;
         }
 
@@ -179,9 +327,19 @@ internal static class ScreenLook
                 return false;
             }
 
-            var png = EncodePng(pixels, width, height, maxWidth: 1280);
-            File.WriteAllBytes(pngPath, png);
-            return File.Exists(pngPath) && new FileInfo(pngPath).Length > 0;
+            hash = AverageHash(pixels, width, height);
+            png = EncodePng(pixels, width, height, maxWidth);
+            if (png.Length == 0)
+            {
+                error = "PNG encode produced no bytes.";
+                return false;
+            }
+            if (!string.IsNullOrWhiteSpace(pngPath))
+            {
+                File.WriteAllBytes(pngPath, png);
+                return File.Exists(pngPath) && new FileInfo(pngPath).Length > 0;
+            }
+            return true;
         }
         finally
         {
@@ -343,9 +501,27 @@ internal static class ScreenLook
         return table;
     }
 
+    private const int DwmwaExtendedFrameBounds = 9;
+
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out WinRect rect);
+    [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int maxCount);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextLength(IntPtr hwnd);
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out WinRect rect, int size);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WinRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
     [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
     [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int width, int height);
     [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
