@@ -81,6 +81,8 @@ Assert(YouTubeMusicPlayback.PearProtocolUri("youtubemusic", "addSongToQueue Gg5H
     "Pear protocol commands should keep spaces encoded.");
 Assert(YouTubeMusicPlayback.PearProtocolUri("youtubemusic", "play") == "youtubemusic://play",
     "Play commands should use the Pear Desktop protocol.");
+Assert(!YouTubeMusicPlayback.PearProtocolUri("youtubemusic", "play").Contains("peardesktop", StringComparison.Ordinal),
+    "Unregistered peardesktop:// links must not be opened.");
 Assert(YouTubeMusicPlayback.LooksLikeMusicUrl("https://music.youtube.com/watch?v=abc&autoplay=1"),
     "Watch URLs should be recognized.");
 Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "new song", "song", "old song", true, false),
@@ -94,7 +96,7 @@ Assert(YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "lofi beats", "playl
 Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "lofi beats", "playlist", "lofi girl", true, true),
     "An explicit change request should replace even generic lofi.");
 
-Console.WriteLine("YouTube Music ID parsing tests passed (46 assertions).");
+Console.WriteLine("YouTube Music ID parsing tests passed (47 assertions).");
 
 static void Assert(bool condition, string message)
 {

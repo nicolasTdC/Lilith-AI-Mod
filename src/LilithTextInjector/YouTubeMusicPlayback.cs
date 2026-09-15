@@ -151,20 +151,15 @@ internal static class YouTubeMusicPlayback
     {
         if (string.IsNullOrWhiteSpace(command))
             return false;
-        var sent = false;
-        foreach (var scheme in new[] { "youtubemusic", "peardesktop" })
+        try
         {
-            try
-            {
-                var uri = PearProtocolUri(scheme, command);
-                Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
-                sent = true;
-            }
-            catch
-            {
-            }
+            Process.Start(new ProcessStartInfo(PearProtocolUri("youtubemusic", command)) { UseShellExecute = true });
+            return true;
         }
-        return sent;
+        catch
+        {
+            return false;
+        }
     }
 
     internal static void OpenInDefaultBrowser(string playUrl)
