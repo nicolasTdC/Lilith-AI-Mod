@@ -1937,9 +1937,26 @@ internal static class DialogueManagerUpdatePatch
     {
         if (string.IsNullOrWhiteSpace(intent))
             intent = "song";
-        var asked = YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic(userText);
-        var changing = YouTubeMusicPlayback.UserAskedToChangeMusic(userText);
+        var previousUserText = GetPreviousUserText(userText);
+        var retry = YouTubeMusicPlayback.LooksLikeRetryMusicPrompt(userText);
+        var asked = YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic(userText, previousUserText);
+        var changing = YouTubeMusicPlayback.UserAskedToChangeMusic(userText) || retry;
         var recentlyStarted = Time.unscaledTime - _youtubeMusicStartedAt < 480f;
+        if (asked && changing)
+        {
+            var originalQuery = query ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(query))
+                query = _youtubeMusicLastQuery;
+            if (string.IsNullOrWhiteSpace(originalQuery)
+                || YouTubeMusicPlayback.LooksLikeSamePlayRequest(
+                    intent, query, _youtubeMusicLastIntent, _youtubeMusicLastQuery))
+            {
+                if (!string.IsNullOrWhiteSpace(query))
+                    intent = "radio";
+            }
+        }
+        Plugin.PluginLog.LogInfo(
+            $"YouTube Music tool: asked={asked} changing={changing} retry={retry} intent={intent} queryChars={(query ?? string.Empty).Length} userChars={(userText ?? string.Empty).Length}.");
         if (!asked)
         {
             Plugin.PluginLog.LogInfo("Skipped unsolicited YouTube Music tool call.");
@@ -1950,7 +1967,7 @@ internal static class DialogueManagerUpdatePatch
                 "Did not start music: the user did not ask to play or change a track. Do not call this tool again, and do not claim you started a playlist."));
         }
         if (YouTubeMusicPlayback.ShouldSkipDuplicatePlay(
-            intent, query, _youtubeMusicLastIntent, _youtubeMusicLastQuery, recentlyStarted, changing))
+            intent, query ?? string.Empty, _youtubeMusicLastIntent, _youtubeMusicLastQuery, recentlyStarted, changing))
         {
             Plugin.PluginLog.LogInfo("Skipped YouTube Music because that request is already playing.");
             return ToolResult(call, false, ApiKeyText(
@@ -1959,8 +1976,42 @@ internal static class DialogueManagerUpdatePatch
                 "それはもう再生中だよ。別の曲に変えてほしいなら、新しい曲名で youtube_music を呼んでね。",
                 "That track is already playing. If the user asked for a different song, call youtube_music with the new title."));
         }
-        var success = TryStartYouTubeMusic(intent, query, out var reply);
+        if (changing && string.IsNullOrWhiteSpace(query))
+        {
+            try
+            {
+                SendVirtualKey(0xB0);
+                Plugin.PluginLog.LogInfo("Sent MEDIA_NEXT because the user asked to switch songs without a new title.");
+                return ToolResult(call, true, ApiKeyText(
+                    "好，幫你換到下一首。",
+                    "好，帮你换到下一首。",
+                    "うん、次の曲にするね。",
+                    "Okay, skipping to the next track."));
+            }
+            catch (Exception exception)
+            {
+                Plugin.PluginLog.LogWarning($"Could not skip YouTube Music track: {exception.Message}");
+            }
+        }
+        var success = TryStartYouTubeMusic(intent, query ?? string.Empty, out var reply);
         return ToolResult(call, success, reply);
+    }
+
+    private static string GetPreviousUserText(string current)
+    {
+        string? previous = null;
+        string? last = null;
+        foreach (var turn in GetRememberedConversationSnapshot())
+        {
+            if (!string.Equals(turn.Role, "user", StringComparison.OrdinalIgnoreCase))
+                continue;
+            previous = last;
+            last = turn.Text;
+        }
+        if (!string.IsNullOrWhiteSpace(last)
+            && string.Equals(last.Trim(), (current ?? string.Empty).Trim(), StringComparison.Ordinal))
+            return previous ?? string.Empty;
+        return last ?? string.Empty;
     }
 
     private static bool TryHandleMediaCommand(string text, out string reply)

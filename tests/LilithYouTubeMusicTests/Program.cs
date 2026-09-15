@@ -26,6 +26,17 @@ Assert(YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic("play lo-fi playlist"),
 Assert(!YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic("estou cansado hoje"), "Casual chat must not count as a music request.");
 Assert(!YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic("that playlist was nice"), "Mentioning a playlist must not start another one.");
 Assert(YouTubeMusicPlayback.UserAskedToChangeMusic("toca outra"), "Asking for another track should count as a change.");
+Assert(YouTubeMusicPlayback.UserAskedToChangeMusic("trocar as musicas"), "Portuguese plural 'músicas' should count as a change.");
+Assert(YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic("eeei vc devia conseguir trocar as musicas agr. tenta ai"),
+    "Asking her to switch songs should count as an explicit music request.");
+Assert(YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic(
+        "tenta de nvo so pra eu ter ctz",
+        "eeei vc devia conseguir trocar as musicas agr. tenta ai"),
+    "Retrying after a switch request should still count as a music request.");
+Assert(!YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic("tenta de nvo so pra eu ter ctz"),
+    "A retry with no music context must not start playback on its own.");
+Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("radio", "cutest pair", "song", "cutest pair", true, true),
+    "Switching the same title to radio should not be treated as a duplicate.");
 Assert(YouTubeMusicPlayback.LooksLikeGenericLofiQuery("lofi girl beats"), "Lofi queries should be recognized.");
 Assert(YouTubeMusicPlayback.WithAutoplay("https://music.youtube.com/watch?v=abc") == "https://music.youtube.com/watch?v=abc&autoplay=1",
     "Watch URLs should request autoplay.");
@@ -62,7 +73,7 @@ Assert(YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "lofi beats", "playl
 Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "lofi beats", "playlist", "lofi girl", true, true),
     "An explicit change request should replace even generic lofi.");
 
-Console.WriteLine("YouTube Music ID parsing tests passed (32 assertions).");
+Console.WriteLine("YouTube Music ID parsing tests passed (37 assertions).");
 
 static void Assert(bool condition, string message)
 {

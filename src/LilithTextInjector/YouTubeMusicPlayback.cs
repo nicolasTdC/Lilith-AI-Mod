@@ -555,8 +555,10 @@ internal static class YouTubeMusicPlayback
     {
         intent = NormalizeIntent(intent);
         lastIntent = NormalizeIntent(lastIntent);
+        if (intent != lastIntent)
+            return false;
         if (intent is "liked" or "library")
-            return intent == lastIntent;
+            return true;
         var normalized = NormalizeMusicText(query ?? string.Empty);
         var lastNormalized = NormalizeMusicText(lastQuery ?? string.Empty);
         return normalized.Length > 0
@@ -580,7 +582,14 @@ internal static class YouTubeMusicPlayback
             && LooksLikeGenericLofiQuery(lastQuery);
     }
 
-    internal static bool UserAskedToPlayOrChangeMusic(string? text)
+    internal static bool UserAskedToPlayOrChangeMusic(string? text, string? previousUserText = null)
+    {
+        if (MatchesExplicitPlayOrChange(text))
+            return true;
+        return LooksLikeRetryMusicPrompt(text) && MatchesExplicitPlayOrChange(previousUserText);
+    }
+
+    internal static bool MatchesExplicitPlayOrChange(string? text)
     {
         if (string.IsNullOrWhiteSpace(text))
             return false;
@@ -595,15 +604,26 @@ internal static class YouTubeMusicPlayback
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
+    internal static bool LooksLikeRetryMusicPrompt(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+        return Regex.IsMatch(
+            text,
+            @"\b(?:tenta(?:r)?|again|retry|novamente|dnvo|nvo)\b|\bde\s+novo\b|\bmais\s+uma\s+vez\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
     internal static bool UserAskedToChangeMusic(string? text)
     {
         if (string.IsNullOrWhiteSpace(text))
             return false;
         return Regex.IsMatch(
             text,
-            @"\b(?:change|another|different|instead|next)\b.{0,24}\b(?:song|track|playlist|music|lo[- ]?fi)\b"
-            + @"|\b(?:troca(?:r)?|muda(?:r)?|outra|pr[oó]xima)\b.{0,16}\b(?:m[uú]sica|musica|playlist|faixa|lo[- ]?fi)\b"
-            + @"|\b(?:something else|another one|stop this|not this|para essa|n[aã]o essa|troca essa|toca outra)\b",
+            @"\b(?:change|another|different|instead|next|switch)\b.{0,32}\b(?:songs?|tracks?|playlists?|music|lo[- ]?fi)\b"
+            + @"|\b(?:troca(?:r)?|muda(?:r)?|outra|pr[oó]xima)\b.{0,32}\b(?:m[uú]sicas?|musicas?|playlist|faixa|lo[- ]?fi)\b"
+            + @"|\b(?:m[uú]sicas?|musicas?)\b.{0,32}\b(?:troca(?:r)?|muda(?:r)?)\b"
+            + @"|\b(?:something else|another one|stop this|not this|para essa|n[aã]o essa|troca essa|toca outra|coloca(?:r)? outra)\b",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
