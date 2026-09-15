@@ -54,12 +54,26 @@ Assert(YouTubeMusicPlayback.QuoteArgument("https://music.youtube.com/watch?v=abc
     "URLs without spaces should stay unquoted.");
 Assert(YouTubeMusicPlayback.QuoteArgument(@"C:\Program Files\YouTube Music.exe") == "\"C:\\Program Files\\YouTube Music.exe\"",
     "Paths with spaces should be quoted.");
-Assert(YouTubeMusicPlayback.SearchBarQuery("song", "Example Song", "example song") == "Example Song",
-    "Pear Desktop search should use the song title, not a watch URL.");
+Assert(YouTubeMusicPlayback.SearchBarQuery("song", "Example Song", "example song") == "example song",
+    "Pear Desktop search should keep a song-and-artist query instead of a watch URL.");
 Assert(YouTubeMusicPlayback.SearchBarQuery("song", "https://music.youtube.com/watch?v=Gg5Hv08w82Q&autoplay=1", "example song") == "example song",
     "Watch URLs must not be pasted into the YouTube Music search bar.");
 Assert(YouTubeMusicPlayback.SearchBarQuery("liked", "Liked music", "") == string.Empty,
     "Liked-music opens should not type into the search bar.");
+Assert(YouTubeMusicPlayback.SearchBarQuery("song", "Butterfly", "butterfly loona") == "butterfly loona",
+    "A title-only catalog hit must not drop the artist from search.");
+Assert(YouTubeMusicPlayback.FormatSearchQuery("Butterfly", "LOONA") == "Butterfly LOONA",
+    "Song searches should include the artist.");
+Assert(YouTubeMusicPlayback.HasSongAndArtist("butterfly loona"), "Song plus artist should count as a complete search.");
+Assert(!YouTubeMusicPlayback.HasSongAndArtist("butterfly"), "A title alone should not count as song-plus-artist.");
+Assert(YouTubeMusicPlayback.ScoreTitle("butterfly loona", "Butterfly", "LOONA")
+    > YouTubeMusicPlayback.ScoreTitle("butterfly loona", "Butterfly"),
+    "The LOONA recording should outrank a title-only Butterfly hit.");
+Assert(YouTubeMusicPlayback.PickBestHit("butterfly loona", new[]
+{
+    new YouTubeMusicPlayback.SearchHit("genericId123", "Butterfly"),
+    new YouTubeMusicPlayback.SearchHit("loonaId12345", "Butterfly", "LOONA")
+})?.VideoId == "loonaId12345", "Search should pick the requested artist, not the first Butterfly.");
 Assert(YouTubeMusicPlayback.LooksLikeMusicUrl("https://music.youtube.com/watch?v=abc&autoplay=1"),
     "Watch URLs should be recognized.");
 Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "new song", "song", "old song", true, false),
@@ -73,7 +87,7 @@ Assert(YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "lofi beats", "playl
 Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "lofi beats", "playlist", "lofi girl", true, true),
     "An explicit change request should replace even generic lofi.");
 
-Console.WriteLine("YouTube Music ID parsing tests passed (37 assertions).");
+Console.WriteLine("YouTube Music ID parsing tests passed (43 assertions).");
 
 static void Assert(bool condition, string message)
 {

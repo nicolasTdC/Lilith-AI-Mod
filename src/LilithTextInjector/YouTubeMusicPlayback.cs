@@ -23,7 +23,7 @@ internal static class YouTubeMusicPlayback
     };
 
     internal readonly record struct PlayResult(bool Success, string Url, string Title, bool UsedPearDesktop = false);
-    internal readonly record struct SearchHit(string VideoId, string Title);
+    internal readonly record struct SearchHit(string VideoId, string Title, string Artist = "");
 
     internal static readonly string[] PearDesktopProcessNames =
     {
@@ -67,7 +67,7 @@ internal static class YouTubeMusicPlayback
         var hit = FindBestVideo(query);
         if (hit == null)
             return Open("https://music.youtube.com/search?q=" + Uri.EscapeDataString(query), query);
-        return Open("https://music.youtube.com/watch?v=" + hit.Value.VideoId, hit.Value.Title);
+        return Open("https://music.youtube.com/watch?v=" + hit.Value.VideoId, DisplayTitle(hit.Value));
     }
 
     private static PlayResult PlayPlaylist(string query)
@@ -87,7 +87,7 @@ internal static class YouTubeMusicPlayback
         var hit = FindBestVideo(query);
         if (hit == null)
             return Open("https://music.youtube.com/search?q=" + Uri.EscapeDataString(query), query);
-        return Open($"https://music.youtube.com/watch?v={hit.Value.VideoId}&list=RDAMVM{hit.Value.VideoId}", hit.Value.Title);
+        return Open($"https://music.youtube.com/watch?v={hit.Value.VideoId}&list=RDAMVM{hit.Value.VideoId}", DisplayTitle(hit.Value));
     }
 
     private static SearchHit? FindBestVideo(string query)
@@ -323,7 +323,7 @@ internal static class YouTubeMusicPlayback
         {
             if (string.IsNullOrWhiteSpace(hit.VideoId))
                 continue;
-            var score = ScoreTitle(query, hit.Title);
+            var score = ScoreTitle(query, hit.Title, hit.Artist);
             if (score <= bestScore)
                 continue;
             bestScore = score;
@@ -332,26 +332,37 @@ internal static class YouTubeMusicPlayback
         return bestScore >= 200 ? best : hits.Count > 0 ? hits[0] : null;
     }
 
-    internal static int ScoreTitle(string query, string title)
+    internal static int ScoreTitle(string query, string title, string artist = "")
     {
         var q = NormalizeMusicText(query);
-        var t = NormalizeMusicText(title);
+        var t = NormalizeMusicText(string.IsNullOrWhiteSpace(artist) ? title : title + " " + artist);
         if (q.Length == 0 || t.Length == 0)
             return 0;
-        if (t.Contains(q, StringComparison.Ordinal) || q.Contains(t, StringComparison.Ordinal))
-            return 1000;
-        var tokens = q.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Where(token => token.Length >= 2 && token is not "ft" and not "feat" and not "the")
-            .ToArray();
-        if (tokens.Length == 0)
+        var queryTokens = MeaningfulMusicTokens(q);
+        var titleTokens = MeaningfulMusicTokens(t);
+        if (queryTokens.Length == 0)
             return 0;
-        var hits = tokens.Count(token => t.Contains(token, StringComparison.Ordinal));
+        if (t.Contains(q, StringComparison.Ordinal) && queryTokens.Length >= 2)
+            return 1000;
+        if (q.Contains(t, StringComparison.Ordinal) && titleTokens.Length >= queryTokens.Length)
+            return 1000;
+        var hits = queryTokens.Count(token => t.Contains(token, StringComparison.Ordinal));
         var score = hits * 100;
-        if (hits == tokens.Length)
+        if (hits == queryTokens.Length)
             score += 250;
         if (t.Contains("karaoke", StringComparison.Ordinal) && !q.Contains("karaoke", StringComparison.Ordinal))
             score -= 80;
         return score;
+    }
+
+    internal static string[] MeaningfulMusicTokens(string normalized)
+    {
+        return (normalized ?? string.Empty)
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(token => token.Length >= 2
+                && token is not "ft" and not "feat" and not "the" and not "by"
+                    and not "do" and not "da" and not "de" and not "of" and not "and")
+            .ToArray();
     }
 
     internal static string NormalizeMusicText(string value)
@@ -392,11 +403,11 @@ internal static class YouTubeMusicPlayback
                 if (element.TryGetProperty("musicResponsiveListItemRenderer", out var item))
                 {
                     var videoId = FindVideoId(item);
-                    var title = FindItemTitle(item);
+                    var (title, artist) = FindItemTitleAndArtist(item);
                     if (!string.IsNullOrWhiteSpace(videoId)
                         && hits.TrueForAll(hit => !string.Equals(hit.VideoId, videoId, StringComparison.Ordinal)))
                     {
-                        hits.Add(new SearchHit(videoId, title));
+                        hits.Add(new SearchHit(videoId, title, artist));
                     }
                 }
                 foreach (var property in element.EnumerateObject())
@@ -437,6 +448,29 @@ internal static class YouTubeMusicPlayback
             }
         }
         return null;
+    }
+
+    private static (string Title, string Artist) FindItemTitleAndArtist(JsonElement item)
+    {
+        if (item.ValueKind == JsonValueKind.Object
+            && item.TryGetProperty("flexColumns", out var columns)
+            && columns.ValueKind == JsonValueKind.Array)
+        {
+            var texts = new List<string>();
+            foreach (var column in columns.EnumerateArray())
+            {
+                var text = FindItemTitle(column);
+                if (text.Length > 0)
+                    texts.Add(text);
+            }
+            var title = texts.Count > 0 ? texts[0] : FindItemTitle(item);
+            var artist = texts.Count > 1 ? texts[1] : string.Empty;
+            var cut = Regex.Split(artist, @"\s*[•·|]\s*");
+            if (cut.Length > 0)
+                artist = cut[0].Trim();
+            return (title, artist);
+        }
+        return (FindItemTitle(item), string.Empty);
     }
 
     private static string FindItemTitle(JsonElement element)
@@ -512,19 +546,50 @@ internal static class YouTubeMusicPlayback
         }
     }
 
-    internal static string SearchBarQuery(string intent, string title, string query)
+    internal static string DisplayTitle(SearchHit hit)
+    {
+        if (string.IsNullOrWhiteSpace(hit.Artist) || NormalizeMusicText(hit.Title).Contains(NormalizeMusicText(hit.Artist)))
+            return hit.Title;
+        return hit.Title + " - " + hit.Artist;
+    }
+
+    internal static string EnsureSongAndArtistQuery(string query, string artist)
+    {
+        return FormatSearchQuery(query, artist);
+    }
+
+    internal static string FormatSearchQuery(string query, string artist)
+    {
+        query = (query ?? string.Empty).Trim();
+        artist = (artist ?? string.Empty).Trim();
+        if (LooksLikeMusicUrl(query))
+            query = string.Empty;
+        if (artist.Length < 1)
+            return query;
+        if (query.Length < 1)
+            return artist;
+        if (NormalizeMusicText(query).Contains(NormalizeMusicText(artist)))
+            return query;
+        return query + " " + artist;
+    }
+
+    internal static bool HasSongAndArtist(string? text)
+    {
+        return MeaningfulMusicTokens(NormalizeMusicText(text ?? string.Empty)).Length >= 2;
+    }
+
+    internal static string SearchBarQuery(string intent, string title, string query, string artist = "")
     {
         intent = NormalizeIntent(intent);
         if (intent is "liked" or "library")
             return string.Empty;
-        foreach (var candidate in new[] { title, query })
-        {
-            var text = (candidate ?? string.Empty).Trim();
-            if (text.Length < 1 || LooksLikeMusicUrl(text))
-                continue;
-            return text;
-        }
-        return string.Empty;
+        var requested = FormatSearchQuery(query, artist);
+        if (HasSongAndArtist(requested))
+            return requested;
+        var catalog = FormatSearchQuery(LooksLikeMusicUrl(title) ? string.Empty : title, artist);
+        if (HasSongAndArtist(catalog))
+            return catalog;
+        return requested.Length > 0 ? requested : catalog;
     }
 
     internal static bool LooksLikeMusicUrl(string? text)
