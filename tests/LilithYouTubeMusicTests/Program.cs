@@ -74,6 +74,13 @@ Assert(YouTubeMusicPlayback.PickBestHit("butterfly loona", new[]
     new YouTubeMusicPlayback.SearchHit("genericId123", "Butterfly"),
     new YouTubeMusicPlayback.SearchHit("loonaId12345", "Butterfly", "LOONA")
 })?.VideoId == "loonaId12345", "Search should pick the requested artist, not the first Butterfly.");
+Assert(YouTubeMusicPlayback.VideoIdFromUrl("https://music.youtube.com/watch?v=Gg5Hv08w82Q&autoplay=1") == "Gg5Hv08w82Q",
+    "Watch URLs should expose the video id for Pear Desktop.");
+Assert(YouTubeMusicPlayback.PearProtocolUri("youtubemusic", "addSongToQueue Gg5Hv08w82Q INSERT_AFTER_CURRENT_VIDEO")
+    == "youtubemusic://addSongToQueue%20Gg5Hv08w82Q%20INSERT_AFTER_CURRENT_VIDEO",
+    "Pear protocol commands should keep spaces encoded.");
+Assert(YouTubeMusicPlayback.PearProtocolUri("youtubemusic", "play") == "youtubemusic://play",
+    "Play commands should use the Pear Desktop protocol.");
 Assert(YouTubeMusicPlayback.LooksLikeMusicUrl("https://music.youtube.com/watch?v=abc&autoplay=1"),
     "Watch URLs should be recognized.");
 Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "new song", "song", "old song", true, false),
@@ -87,7 +94,7 @@ Assert(YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "lofi beats", "playl
 Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "lofi beats", "playlist", "lofi girl", true, true),
     "An explicit change request should replace even generic lofi.");
 
-Console.WriteLine("YouTube Music ID parsing tests passed (43 assertions).");
+Console.WriteLine("YouTube Music ID parsing tests passed (46 assertions).");
 
 static void Assert(bool condition, string message)
 {

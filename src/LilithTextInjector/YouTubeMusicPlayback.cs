@@ -22,7 +22,7 @@ internal static class YouTubeMusicPlayback
         Timeout = TimeSpan.FromSeconds(15)
     };
 
-    internal readonly record struct PlayResult(bool Success, string Url, string Title, bool UsedPearDesktop = false);
+    internal readonly record struct PlayResult(bool Success, string Url, string Title, bool UsedPearDesktop = false, string VideoId = "");
     internal readonly record struct SearchHit(string VideoId, string Title, string Artist = "");
 
     internal static readonly string[] PearDesktopProcessNames =
@@ -129,7 +129,42 @@ internal static class YouTubeMusicPlayback
         }
         if (!LastOpenUsedPearDesktop)
             OpenInDefaultBrowser(playUrl);
-        return new PlayResult(true, playUrl, title, LastOpenUsedPearDesktop);
+        return new PlayResult(true, playUrl, title, LastOpenUsedPearDesktop, VideoIdFromUrl(playUrl) ?? string.Empty);
+    }
+
+    internal static string? VideoIdFromUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return null;
+        var match = Regex.Match(url, @"[?&]v=([\w-]{11})");
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    internal static string PearProtocolUri(string scheme, string command)
+    {
+        scheme = string.IsNullOrWhiteSpace(scheme) ? "youtubemusic" : scheme.Trim();
+        command = (command ?? string.Empty).Trim();
+        return scheme + "://" + command.Replace(" ", "%20");
+    }
+
+    internal static bool TrySendPearCommand(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command))
+            return false;
+        var sent = false;
+        foreach (var scheme in new[] { "youtubemusic", "peardesktop" })
+        {
+            try
+            {
+                var uri = PearProtocolUri(scheme, command);
+                Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
+                sent = true;
+            }
+            catch
+            {
+            }
+        }
+        return sent;
     }
 
     internal static void OpenInDefaultBrowser(string playUrl)

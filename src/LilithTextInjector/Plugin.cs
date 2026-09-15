@@ -549,6 +549,7 @@ internal static class DialogueManagerUpdatePatch
     private static string _youtubeMusicLastQuery = string.Empty;
     private static string _youtubeMusicPlayUrl = string.Empty;
     private static string _youtubeMusicSearchText = string.Empty;
+    private static string _youtubeMusicVideoId = string.Empty;
     private static string _youtubeMusicClipboardBeforePlay = string.Empty;
     private static IntPtr _apiKeyTrayPointer;
     private static bool _apiKeyDialogMode;
@@ -1779,13 +1780,16 @@ internal static class DialogueManagerUpdatePatch
         }
 
         _youtubeMusicStartedAt = Time.unscaledTime;
-        _youtubeMusicPlayNudgeAt = Time.unscaledTime + (result.UsedPearDesktop ? 3.2f : 2.4f);
+        _youtubeMusicPlayNudgeAt = Time.unscaledTime + (result.UsedPearDesktop
+            ? (_youtubeMusicVideoId.Length == 11 ? 1.2f : 3.2f)
+            : 2.4f);
         _youtubeMusicPlayNudgeTries = 0;
         _youtubeMusicLastIntent = intent ?? string.Empty;
         _youtubeMusicLastQuery = query ?? string.Empty;
         _youtubeMusicPlayUrl = result.Url;
+        _youtubeMusicVideoId = result.VideoId ?? string.Empty;
         _youtubeMusicSearchText = YouTubeMusicPlayback.SearchBarQuery(intent ?? "song", result.Title, query ?? string.Empty);
-        if (result.UsedPearDesktop && OperatingSystem.IsWindows() && _youtubeMusicSearchText.Length > 0)
+        if (result.UsedPearDesktop && OperatingSystem.IsWindows() && _youtubeMusicVideoId.Length != 11 && _youtubeMusicSearchText.Length > 0)
         {
             try { _youtubeMusicClipboardBeforePlay = GUIUtility.systemCopyBuffer; }
             catch { _youtubeMusicClipboardBeforePlay = string.Empty; }
@@ -1793,7 +1797,7 @@ internal static class DialogueManagerUpdatePatch
             catch { }
         }
         Plugin.PluginLog.LogInfo(result.UsedPearDesktop
-            ? $"Opened YouTube Music in Pear Desktop ({intent}, queryChars={_youtubeMusicLastQuery.Length})."
+            ? $"Opened YouTube Music in Pear Desktop ({intent}, queryChars={_youtubeMusicLastQuery.Length}, videoIdChars={_youtubeMusicVideoId.Length})."
             : $"Opened YouTube Music in the default browser; Pear Desktop was not found ({intent}, queryChars={_youtubeMusicLastQuery.Length}).");
         reply = intent switch
         {
@@ -1824,9 +1828,12 @@ internal static class DialogueManagerUpdatePatch
         }
 
         _youtubeMusicPlayNudgeTries++;
-        var extraSearchTries = YouTubeMusicPlayback.LastOpenUsedPearDesktop && _youtubeMusicSearchText.Length > 0 ? 1 : 0;
+        var extraSearchTries = YouTubeMusicPlayback.LastOpenUsedPearDesktop
+            && (_youtubeMusicVideoId.Length == 11 || _youtubeMusicSearchText.Length > 0)
+            ? 1
+            : 0;
         if (_youtubeMusicPlayNudgeTries < 2 + extraSearchTries)
-            _youtubeMusicPlayNudgeAt = Time.unscaledTime + (_youtubeMusicPlayNudgeTries == 1 ? 2.4f : 1.8f);
+            _youtubeMusicPlayNudgeAt = Time.unscaledTime + (_youtubeMusicPlayNudgeTries == 1 ? 2.2f : 1.2f);
         else
         {
             RestoreYouTubeMusicClipboard();
@@ -1846,6 +1853,26 @@ internal static class DialogueManagerUpdatePatch
         if (window == IntPtr.Zero)
             return;
         SetForegroundWindow(window);
+        if (YouTubeMusicPlayback.LastOpenUsedPearDesktop && _youtubeMusicVideoId.Length == 11)
+        {
+            if (_youtubeMusicPlayNudgeTries == 0)
+            {
+                YouTubeMusicPlayback.TrySendPearCommand(
+                    "addSongToQueue " + _youtubeMusicVideoId + " INSERT_AFTER_CURRENT_VIDEO");
+                Plugin.PluginLog.LogInfo("Queued the requested track in Pear Desktop after the current song.");
+                return;
+            }
+            if (_youtubeMusicPlayNudgeTries == 1)
+            {
+                YouTubeMusicPlayback.TrySendPearCommand("next");
+                Plugin.PluginLog.LogInfo("Skipped to the queued track in Pear Desktop.");
+                return;
+            }
+            YouTubeMusicPlayback.TrySendPearCommand("play");
+            RestoreYouTubeMusicClipboard();
+            Plugin.PluginLog.LogInfo("Sent play so Pear Desktop starts the queued track even if it was paused.");
+            return;
+        }
         if (YouTubeMusicPlayback.LastOpenUsedPearDesktop && _youtubeMusicSearchText.Length > 0)
         {
             if (_youtubeMusicPlayNudgeTries == 0)
@@ -1895,6 +1922,7 @@ internal static class DialogueManagerUpdatePatch
         }
         _youtubeMusicPlayUrl = string.Empty;
         _youtubeMusicSearchText = string.Empty;
+        _youtubeMusicVideoId = string.Empty;
         _youtubeMusicClipboardBeforePlay = string.Empty;
     }
 
