@@ -546,6 +546,8 @@ internal static class DialogueManagerUpdatePatch
     private static float _youtubeMusicPlayNudgeAt = -1f;
     private static int _youtubeMusicPlayNudgeTries;
     private static string _youtubeMusicLastQuery = string.Empty;
+    private static string _youtubeMusicPlayUrl = string.Empty;
+    private static string _youtubeMusicClipboardBeforePlay = string.Empty;
     private static IntPtr _apiKeyTrayPointer;
     private static bool _apiKeyDialogMode;
     private static volatile bool _apiKeyOpenRequested;
@@ -1775,10 +1777,20 @@ internal static class DialogueManagerUpdatePatch
         }
 
         _youtubeMusicStartedAt = Time.unscaledTime;
-        _youtubeMusicPlayNudgeAt = Time.unscaledTime + 2.4f;
+        _youtubeMusicPlayNudgeAt = Time.unscaledTime + (result.UsedPearDesktop ? 3.2f : 2.4f);
         _youtubeMusicPlayNudgeTries = 0;
         _youtubeMusicLastQuery = query ?? string.Empty;
-        Plugin.PluginLog.LogInfo($"Opened YouTube Music ({intent}, queryChars={_youtubeMusicLastQuery.Length}).");
+        _youtubeMusicPlayUrl = result.Url;
+        if (result.UsedPearDesktop && OperatingSystem.IsWindows())
+        {
+            try { _youtubeMusicClipboardBeforePlay = GUIUtility.systemCopyBuffer; }
+            catch { _youtubeMusicClipboardBeforePlay = string.Empty; }
+            try { GUIUtility.systemCopyBuffer = result.Url; }
+            catch { }
+        }
+        Plugin.PluginLog.LogInfo(result.UsedPearDesktop
+            ? $"Opened YouTube Music in Pear Desktop ({intent}, queryChars={_youtubeMusicLastQuery.Length})."
+            : $"Opened YouTube Music in the default browser; Pear Desktop was not found ({intent}, queryChars={_youtubeMusicLastQuery.Length}).");
         reply = intent switch
         {
             "liked" => ApiKeyText("好，幫你打開喜歡的音樂。", "好，帮你打开喜欢的音乐。", "うん、高評価の音楽を開くね。", "Okay, opening your liked music."),
@@ -1802,35 +1814,94 @@ internal static class DialogueManagerUpdatePatch
         catch (Exception exception)
         {
             Plugin.PluginLog.LogWarning($"Could not auto-start YouTube Music playback: {exception.Message}");
+            RestoreYouTubeMusicClipboard();
             _youtubeMusicPlayNudgeAt = -1f;
             return;
         }
 
         _youtubeMusicPlayNudgeTries++;
-        if (_youtubeMusicPlayNudgeTries < 2)
+        var extraSearchTries = YouTubeMusicPlayback.LastOpenUsedPearDesktop ? 1 : 0;
+        if (_youtubeMusicPlayNudgeTries < 2 + extraSearchTries)
             _youtubeMusicPlayNudgeAt = Time.unscaledTime + 1.8f;
         else
+        {
+            RestoreYouTubeMusicClipboard();
             _youtubeMusicPlayNudgeAt = -1f;
+        }
     }
 
     private static void NudgeYouTubeMusicPlay()
     {
         const uint WmAppCommand = 0x0319;
         const int AppCommandMediaPlay = 46;
-        var window = FindNewestBrowserWindow();
+        var window = FindNewestPearDesktopWindow();
+        if (window == IntPtr.Zero)
+            window = FindNewestBrowserWindow();
         if (window == IntPtr.Zero)
             window = GetForegroundWindow();
         if (window == IntPtr.Zero)
             return;
         SetForegroundWindow(window);
+        if (YouTubeMusicPlayback.LastOpenUsedPearDesktop && !string.IsNullOrWhiteSpace(_youtubeMusicPlayUrl))
+        {
+            if (_youtubeMusicPlayNudgeTries == 0)
+            {
+                SendVirtualKey(0xBF);
+                SendShortcut(0x11, 0x41);
+                SendShortcut(0x11, 0x56);
+                SendVirtualKey(0x0D);
+                Plugin.PluginLog.LogInfo("Sent search paste to Pear Desktop so YouTube Music opens the requested track.");
+                return;
+            }
+            if (_youtubeMusicPlayNudgeTries == 1)
+            {
+                SendVirtualKey(0x0D);
+                Plugin.PluginLog.LogInfo("Confirmed the first YouTube Music search result in Pear Desktop.");
+                return;
+            }
+            RestoreYouTubeMusicClipboard();
+        }
         SendMessage(window, WmAppCommand, window, (IntPtr)(AppCommandMediaPlay << 16));
-        Plugin.PluginLog.LogInfo("Sent MEDIA_PLAY to start YouTube Music after the page opened.");
+        try
+        {
+            Process.Start(new ProcessStartInfo("youtubemusic://play") { UseShellExecute = true });
+        }
+        catch
+        {
+        }
+        Plugin.PluginLog.LogInfo("Sent MEDIA_PLAY to start YouTube Music after Pear Desktop opened.");
+    }
+
+    private static void RestoreYouTubeMusicClipboard()
+    {
+        if (string.IsNullOrEmpty(_youtubeMusicPlayUrl))
+            return;
+        try
+        {
+            if (!string.IsNullOrEmpty(_youtubeMusicClipboardBeforePlay))
+                GUIUtility.systemCopyBuffer = _youtubeMusicClipboardBeforePlay;
+        }
+        catch
+        {
+        }
+        _youtubeMusicPlayUrl = string.Empty;
+        _youtubeMusicClipboardBeforePlay = string.Empty;
+    }
+
+    private static IntPtr FindNewestPearDesktopWindow()
+    {
+        return FindNewestWindowByProcessNames(YouTubeMusicPlayback.PearDesktopProcessNames);
     }
 
     private static IntPtr FindNewestBrowserWindow()
     {
+        return FindNewestWindowByProcessNames(new[] { "chrome", "msedge", "brave", "firefox", "opera", "vivaldi" });
+    }
+
+    private static IntPtr FindNewestWindowByProcessNames(IEnumerable<string> names)
+    {
         Process? newest = null;
-        foreach (var name in new[] { "chrome", "msedge", "brave", "firefox", "opera", "vivaldi" })
+        foreach (var name in names)
         {
             Process[] processes;
             try { processes = Process.GetProcessesByName(name); }
@@ -2169,6 +2240,13 @@ internal static class DialogueManagerUpdatePatch
         {
             var shortcut = ResolveWindowsShortcut(new[] { "Spotify" });
             return new ApplicationLauncher { Name = "Spotify", Target = shortcut ?? "spotify:" };
+        }
+        if (Regex.IsMatch(text, "(Pear Desktop|YouTube Music Desktop|youtube-music|油管音樂桌面|油管音乐桌面)", RegexOptions.IgnoreCase)
+            || Regex.IsMatch(text, "\\byoutube\\s*music\\b", RegexOptions.IgnoreCase))
+        {
+            var pear = YouTubeMusicPlayback.FindPearDesktopTarget();
+            if (!string.IsNullOrWhiteSpace(pear))
+                return new ApplicationLauncher { Name = "Pear Desktop", Target = pear };
         }
 
         var applications = new[]
@@ -5759,7 +5837,7 @@ internal static class DialogueManagerUpdatePatch
             new { name = ScreenLook.ToolName, description = ScreenLook.ToolDescription, parameters = Parameters(new { }) },
             new { name = "copy_text", description = "Write user-specified non-sensitive text to the local clipboard. Never use for passwords, API keys, OTPs, tokens, private identifiers, or other credentials. Clipboard reading is unavailable.", parameters = Parameters(new { text = new { type = "STRING", description = "The exact non-sensitive text the user explicitly wants copied." } }, "text") },
             new { name = "browser_search", description = "Open the default browser with a Google search. Use when the user explicitly wants results opened in their browser; ordinary factual questions can use Google Search instead.", parameters = Parameters(new { query = new { type = "STRING", description = "Search query explicitly requested by the user." } }, "query") },
-            new { name = "youtube_music", description = "Play a song, playlist, radio, liked music, or library on YouTube Music only when the user explicitly asks to play or change music. Never call this unsolicited, never default to lofi, and never start another playlist over music that is already playing. Uses the signed-in browser session. Never ask for a password.", parameters = Parameters(new { intent = new { type = "STRING", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "STRING", description = "Song, artist, or playlist name. Required for song, playlist, and radio. Ignored for liked and library." } }, "intent") },
+            new { name = "youtube_music", description = "Play a song, playlist, radio, liked music, or library on YouTube Music in Pear Desktop only when the user explicitly asks to play or change music. Never call this unsolicited, never default to lofi, and never start another playlist over music that is already playing. Uses the signed-in Pear Desktop / YouTube Music app, not the web browser. Never ask for a password.", parameters = Parameters(new { intent = new { type = "STRING", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "STRING", description = "Song, artist, or playlist name. Required for song, playlist, and radio. Ignored for liked and library." } }, "intent") },
             new { name = "get_system_status", description = "Read a non-personal local system status value.", parameters = Parameters(new { category = new { type = "STRING", description = "One of: battery, memory, storage, network." } }, "category") },
             new { name = "keyboard_shortcut", description = "Send one allowlisted reversible shortcut to the most recent non-Lilith foreground app. Arbitrary keys and typing are unavailable.", parameters = Parameters(new { action = new { type = "STRING", description = "One of: undo, redo, save, select_all, find, refresh, fullscreen, escape." } }, "action") },
             new { name = "set_timer", description = "Create a local timer that Lilith will announce. Use a duration from 0.1 to 1440 minutes.", parameters = Parameters(new { minutes = new { type = "NUMBER", description = "Timer duration in minutes." }, message = new { type = "STRING", description = "Short announcement when the timer ends; omit personal or sensitive information." } }, "minutes", "message") },
@@ -6390,7 +6468,7 @@ internal static class DialogueManagerUpdatePatch
         tools.Add(new { type = "function", name = ScreenLook.ToolName, description = ScreenLook.ToolDescription, parameters = Parameters(new { }) });
         tools.Add(new { type = "function", name = "copy_text", description = "Write user-specified non-sensitive text to the local clipboard. Never use for passwords, API keys, OTPs, tokens, private identifiers, or other credentials. Clipboard reading is unavailable.", parameters = Parameters(new { text = new { type = "string", description = "The exact non-sensitive text the user explicitly wants copied." } }, "text") });
         tools.Add(new { type = "function", name = "browser_search", description = "Open the default browser with a Google search only when the user asks to see results in their browser. Prefer the built-in web search tool for factual lookups.", parameters = Parameters(new { query = new { type = "string", description = "Search query explicitly requested by the user." } }, "query") });
-        tools.Add(new { type = "function", name = "youtube_music", description = "Play a song, playlist, radio, liked music, or library on YouTube Music only when the user explicitly asks to play or change music. Never call this unsolicited, never default to lofi, and never start another playlist over music that is already playing.", parameters = Parameters(new { intent = new { type = "string", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "string", description = "Song, artist, or playlist name. Required for song, playlist, and radio." } }, "intent") });
+        tools.Add(new { type = "function", name = "youtube_music", description = "Play a song, playlist, radio, liked music, or library on YouTube Music in Pear Desktop only when the user explicitly asks to play or change music. Never call this unsolicited, never default to lofi, and never start another playlist over music that is already playing. Uses Pear Desktop, not the browser.", parameters = Parameters(new { intent = new { type = "string", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "string", description = "Song, artist, or playlist name. Required for song, playlist, and radio." } }, "intent") });
         tools.Add(new { type = "function", name = "get_system_status", description = "Read a non-personal local system status value.", parameters = Parameters(new { category = new { type = "string", description = "One of: battery, memory, storage, network." } }, "category") });
         tools.Add(new { type = "function", name = "keyboard_shortcut", description = "Send one allowlisted reversible shortcut to the most recent non-Lilith foreground app. Arbitrary keys and typing are unavailable.", parameters = Parameters(new { action = new { type = "string", description = "One of: undo, redo, save, select_all, find, refresh, fullscreen, escape." } }, "action") });
         tools.Add(new { type = "function", name = "set_timer", description = "Create a local timer that Lilith will announce. Use a duration from 0.1 to 1440 minutes.", parameters = Parameters(new { minutes = new { type = "number", description = "Timer duration in minutes." }, message = new { type = "string", description = "Short announcement when the timer ends; omit personal or sensitive information." } }, "minutes", "message") });

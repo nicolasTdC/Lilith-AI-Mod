@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
@@ -21,8 +22,20 @@ internal static class YouTubeMusicPlayback
         Timeout = TimeSpan.FromSeconds(15)
     };
 
-    internal readonly record struct PlayResult(bool Success, string Url, string Title);
+    internal readonly record struct PlayResult(bool Success, string Url, string Title, bool UsedPearDesktop = false);
     internal readonly record struct SearchHit(string VideoId, string Title);
+
+    internal static readonly string[] PearDesktopProcessNames =
+    {
+        "YouTube Music",
+        "youtube-music",
+        "youtube-music-desktop-app",
+        "YouTube Music Desktop App",
+        "pear-desktop",
+        "Pear Desktop"
+    };
+
+    internal static bool LastOpenUsedPearDesktop { get; private set; }
 
     internal static PlayResult Play(string intent, string query)
     {
@@ -105,8 +118,158 @@ internal static class YouTubeMusicPlayback
     private static PlayResult Open(string url, string title)
     {
         var playUrl = WithAutoplay(url);
+        LastOpenUsedPearDesktop = false;
+        try
+        {
+            LastOpenUsedPearDesktop = TryOpenInPearDesktop(playUrl);
+        }
+        catch
+        {
+            LastOpenUsedPearDesktop = false;
+        }
+        if (!LastOpenUsedPearDesktop)
+            OpenInDefaultBrowser(playUrl);
+        return new PlayResult(true, playUrl, title, LastOpenUsedPearDesktop);
+    }
+
+    internal static void OpenInDefaultBrowser(string playUrl)
+    {
         Process.Start(new ProcessStartInfo(playUrl) { UseShellExecute = true });
-        return new PlayResult(true, playUrl, title);
+    }
+
+    internal static bool LooksLikePearDesktopProcess(string? processName)
+    {
+        if (string.IsNullOrWhiteSpace(processName))
+            return false;
+        var name = Path.GetFileNameWithoutExtension(processName.Trim());
+        return PearDesktopProcessNames.Any(candidate =>
+            string.Equals(candidate, name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static bool LooksLikePearDesktopShortcut(string? displayName)
+    {
+        if (string.IsNullOrWhiteSpace(displayName))
+            return false;
+        var name = Path.GetFileNameWithoutExtension(displayName.Trim());
+        return Regex.IsMatch(
+            name,
+            @"pear\s*desktop|youtube\s*music(?:\s*desktop(?:\s*app)?)?",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
+    internal static bool TryOpenInPearDesktop(string playUrl)
+    {
+        var target = FindPearDesktopTarget();
+        if (string.IsNullOrWhiteSpace(target))
+            return false;
+        try
+        {
+            var start = new ProcessStartInfo(target)
+            {
+                UseShellExecute = true
+            };
+            if (string.Equals(Path.GetExtension(target), ".exe", StringComparison.OrdinalIgnoreCase))
+                start.Arguments = QuoteArgument(playUrl);
+            Process.Start(start);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    internal static string? FindPearDesktopTarget()
+    {
+        foreach (var name in PearDesktopProcessNames)
+        {
+            Process[] processes;
+            try { processes = Process.GetProcessesByName(name); }
+            catch { continue; }
+            foreach (var process in processes)
+            {
+                try
+                {
+                    var path = process.MainModule?.FileName;
+                    if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                        return path;
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+        }
+
+        foreach (var path in EnumeratePearDesktopInstallPaths())
+        {
+            if (File.Exists(path))
+                return path;
+        }
+
+        return FindPearDesktopShortcut();
+    }
+
+    internal static IEnumerable<string> EnumeratePearDesktopInstallPaths()
+    {
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var programs = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var programsX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        foreach (var root in new[] { local, programs, programsX86 })
+        {
+            if (string.IsNullOrWhiteSpace(root))
+                continue;
+            yield return Path.Combine(root, "Programs", "youtube-music", "YouTube Music.exe");
+            yield return Path.Combine(root, "Programs", "YouTube Music", "YouTube Music.exe");
+            yield return Path.Combine(root, "Programs", "pear-desktop", "YouTube Music.exe");
+            yield return Path.Combine(root, "Programs", "pear-desktop", "Pear Desktop.exe");
+            yield return Path.Combine(root, "youtube-music-desktop-app", "YouTube Music.exe");
+            yield return Path.Combine(root, "youtube-music", "YouTube Music.exe");
+            yield return Path.Combine(root, "pear-desktop", "YouTube Music.exe");
+        }
+
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrWhiteSpace(userProfile))
+        {
+            yield return Path.Combine(userProfile, "scoop", "apps", "pear-desktop", "current", "YouTube Music.exe");
+            yield return Path.Combine(userProfile, "scoop", "apps", "youtube-music", "current", "YouTube Music.exe");
+        }
+    }
+
+    private static string? FindPearDesktopShortcut()
+    {
+        foreach (var root in new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu),
+            Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory),
+            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+        })
+        {
+            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+                continue;
+            string[] shortcuts;
+            try { shortcuts = Directory.GetFiles(root, "*.lnk", SearchOption.AllDirectories); }
+            catch { continue; }
+            foreach (var shortcut in shortcuts)
+            {
+                if (LooksLikePearDesktopShortcut(Path.GetFileNameWithoutExtension(shortcut)))
+                    return shortcut;
+            }
+        }
+        return null;
+    }
+
+    internal static string QuoteArgument(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return "\"\"";
+        if (!value.Contains(' ') && !value.Contains('"') && !value.Contains('\t'))
+            return value;
+        return "\"" + value.Replace("\"", "\\\"") + "\"";
     }
 
     private static JsonElement Search(string query, string? filter)

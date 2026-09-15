@@ -33,8 +33,18 @@ Assert(YouTubeMusicPlayback.WithAutoplay("https://music.youtube.com/playlist?lis
     "Playlist URLs should request autoplay.");
 Assert(YouTubeMusicPlayback.WithAutoplay("https://music.youtube.com/watch?v=abc&autoplay=1") == "https://music.youtube.com/watch?v=abc&autoplay=1",
     "Existing autoplay flags must not be duplicated.");
+Assert(YouTubeMusicPlayback.LooksLikePearDesktopProcess("YouTube Music"), "Pear Desktop's Windows process name should match.");
+Assert(YouTubeMusicPlayback.LooksLikePearDesktopProcess("youtube-music"), "Pear Desktop's linux-style process name should match.");
+Assert(!YouTubeMusicPlayback.LooksLikePearDesktopProcess("firefox"), "Firefox must not be treated as Pear Desktop.");
+Assert(YouTubeMusicPlayback.LooksLikePearDesktopShortcut("Pear Desktop"), "Start Menu Pear Desktop shortcuts should match.");
+Assert(YouTubeMusicPlayback.LooksLikePearDesktopShortcut("YouTube Music"), "Start Menu YouTube Music shortcuts should match.");
+Assert(!YouTubeMusicPlayback.LooksLikePearDesktopShortcut("YouTube"), "Plain YouTube shortcuts must not match.");
+Assert(YouTubeMusicPlayback.QuoteArgument("https://music.youtube.com/watch?v=abc") == "https://music.youtube.com/watch?v=abc",
+    "URLs without spaces should stay unquoted.");
+Assert(YouTubeMusicPlayback.QuoteArgument(@"C:\Program Files\YouTube Music.exe") == "\"C:\\Program Files\\YouTube Music.exe\"",
+    "Paths with spaces should be quoted.");
 
-Console.WriteLine("YouTube Music ID parsing tests passed (15 assertions).");
+Console.WriteLine("YouTube Music ID parsing tests passed (23 assertions).");
 
 static void Assert(bool condition, string message)
 {
