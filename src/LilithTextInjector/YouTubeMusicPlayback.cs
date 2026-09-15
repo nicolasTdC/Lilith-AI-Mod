@@ -512,6 +512,74 @@ internal static class YouTubeMusicPlayback
         }
     }
 
+    internal static string SearchBarQuery(string intent, string title, string query)
+    {
+        intent = NormalizeIntent(intent);
+        if (intent is "liked" or "library")
+            return string.Empty;
+        foreach (var candidate in new[] { title, query })
+        {
+            var text = (candidate ?? string.Empty).Trim();
+            if (text.Length < 1 || LooksLikeMusicUrl(text))
+                continue;
+            return text;
+        }
+        return string.Empty;
+    }
+
+    internal static bool LooksLikeMusicUrl(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+        return text.Contains("://", StringComparison.Ordinal)
+            || text.StartsWith("music.youtube.com", StringComparison.OrdinalIgnoreCase)
+            || text.StartsWith("youtube.com", StringComparison.OrdinalIgnoreCase)
+            || text.StartsWith("youtu.be", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static string NormalizeIntent(string? intent)
+    {
+        intent = (intent ?? "song").Trim().ToLowerInvariant();
+        return intent switch
+        {
+            "likes" or "liked_songs" or "liked_music" => "liked",
+            _ => string.IsNullOrWhiteSpace(intent) ? "song" : intent
+        };
+    }
+
+    internal static bool LooksLikeSamePlayRequest(
+        string intent,
+        string query,
+        string lastIntent,
+        string lastQuery)
+    {
+        intent = NormalizeIntent(intent);
+        lastIntent = NormalizeIntent(lastIntent);
+        if (intent is "liked" or "library")
+            return intent == lastIntent;
+        var normalized = NormalizeMusicText(query ?? string.Empty);
+        var lastNormalized = NormalizeMusicText(lastQuery ?? string.Empty);
+        return normalized.Length > 0
+            && string.Equals(normalized, lastNormalized, StringComparison.Ordinal);
+    }
+
+    internal static bool ShouldSkipDuplicatePlay(
+        string intent,
+        string query,
+        string lastIntent,
+        string lastQuery,
+        bool recentlyStarted,
+        bool askedToChange)
+    {
+        if (!recentlyStarted)
+            return false;
+        if (LooksLikeSamePlayRequest(intent, query, lastIntent, lastQuery))
+            return true;
+        return !askedToChange
+            && LooksLikeGenericLofiQuery(query)
+            && LooksLikeGenericLofiQuery(lastQuery);
+    }
+
     internal static bool UserAskedToPlayOrChangeMusic(string? text)
     {
         if (string.IsNullOrWhiteSpace(text))

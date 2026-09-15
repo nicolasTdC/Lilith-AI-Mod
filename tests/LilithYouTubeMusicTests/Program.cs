@@ -43,8 +43,26 @@ Assert(YouTubeMusicPlayback.QuoteArgument("https://music.youtube.com/watch?v=abc
     "URLs without spaces should stay unquoted.");
 Assert(YouTubeMusicPlayback.QuoteArgument(@"C:\Program Files\YouTube Music.exe") == "\"C:\\Program Files\\YouTube Music.exe\"",
     "Paths with spaces should be quoted.");
+Assert(YouTubeMusicPlayback.SearchBarQuery("song", "Example Song", "example song") == "Example Song",
+    "Pear Desktop search should use the song title, not a watch URL.");
+Assert(YouTubeMusicPlayback.SearchBarQuery("song", "https://music.youtube.com/watch?v=Gg5Hv08w82Q&autoplay=1", "example song") == "example song",
+    "Watch URLs must not be pasted into the YouTube Music search bar.");
+Assert(YouTubeMusicPlayback.SearchBarQuery("liked", "Liked music", "") == string.Empty,
+    "Liked-music opens should not type into the search bar.");
+Assert(YouTubeMusicPlayback.LooksLikeMusicUrl("https://music.youtube.com/watch?v=abc&autoplay=1"),
+    "Watch URLs should be recognized.");
+Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "new song", "song", "old song", true, false),
+    "A different song request should switch even if music is already playing.");
+Assert(YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "same song", "song", "same song", true, false),
+    "Repeating the same song should not reopen it.");
+Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "new song", "song", "old song", false, false),
+    "The first play request should not be treated as a duplicate.");
+Assert(YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "lofi beats", "playlist", "lofi girl", true, false),
+    "A second generic lofi request should stay skipped.");
+Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "lofi beats", "playlist", "lofi girl", true, true),
+    "An explicit change request should replace even generic lofi.");
 
-Console.WriteLine("YouTube Music ID parsing tests passed (23 assertions).");
+Console.WriteLine("YouTube Music ID parsing tests passed (32 assertions).");
 
 static void Assert(bool condition, string message)
 {

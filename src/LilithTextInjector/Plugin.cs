@@ -545,8 +545,10 @@ internal static class DialogueManagerUpdatePatch
     private static float _youtubeMusicStartedAt = -999f;
     private static float _youtubeMusicPlayNudgeAt = -1f;
     private static int _youtubeMusicPlayNudgeTries;
+    private static string _youtubeMusicLastIntent = string.Empty;
     private static string _youtubeMusicLastQuery = string.Empty;
     private static string _youtubeMusicPlayUrl = string.Empty;
+    private static string _youtubeMusicSearchText = string.Empty;
     private static string _youtubeMusicClipboardBeforePlay = string.Empty;
     private static IntPtr _apiKeyTrayPointer;
     private static bool _apiKeyDialogMode;
@@ -1779,13 +1781,15 @@ internal static class DialogueManagerUpdatePatch
         _youtubeMusicStartedAt = Time.unscaledTime;
         _youtubeMusicPlayNudgeAt = Time.unscaledTime + (result.UsedPearDesktop ? 3.2f : 2.4f);
         _youtubeMusicPlayNudgeTries = 0;
+        _youtubeMusicLastIntent = intent ?? string.Empty;
         _youtubeMusicLastQuery = query ?? string.Empty;
         _youtubeMusicPlayUrl = result.Url;
-        if (result.UsedPearDesktop && OperatingSystem.IsWindows())
+        _youtubeMusicSearchText = YouTubeMusicPlayback.SearchBarQuery(intent ?? "song", result.Title, query ?? string.Empty);
+        if (result.UsedPearDesktop && OperatingSystem.IsWindows() && _youtubeMusicSearchText.Length > 0)
         {
             try { _youtubeMusicClipboardBeforePlay = GUIUtility.systemCopyBuffer; }
             catch { _youtubeMusicClipboardBeforePlay = string.Empty; }
-            try { GUIUtility.systemCopyBuffer = result.Url; }
+            try { GUIUtility.systemCopyBuffer = _youtubeMusicSearchText; }
             catch { }
         }
         Plugin.PluginLog.LogInfo(result.UsedPearDesktop
@@ -1820,7 +1824,7 @@ internal static class DialogueManagerUpdatePatch
         }
 
         _youtubeMusicPlayNudgeTries++;
-        var extraSearchTries = YouTubeMusicPlayback.LastOpenUsedPearDesktop ? 1 : 0;
+        var extraSearchTries = YouTubeMusicPlayback.LastOpenUsedPearDesktop && _youtubeMusicSearchText.Length > 0 ? 1 : 0;
         if (_youtubeMusicPlayNudgeTries < 2 + extraSearchTries)
             _youtubeMusicPlayNudgeAt = Time.unscaledTime + 1.8f;
         else
@@ -1842,15 +1846,16 @@ internal static class DialogueManagerUpdatePatch
         if (window == IntPtr.Zero)
             return;
         SetForegroundWindow(window);
-        if (YouTubeMusicPlayback.LastOpenUsedPearDesktop && !string.IsNullOrWhiteSpace(_youtubeMusicPlayUrl))
+        if (YouTubeMusicPlayback.LastOpenUsedPearDesktop && _youtubeMusicSearchText.Length > 0)
         {
             if (_youtubeMusicPlayNudgeTries == 0)
             {
+                SendVirtualKey(0x1B);
                 SendVirtualKey(0xBF);
                 SendShortcut(0x11, 0x41);
                 SendShortcut(0x11, 0x56);
                 SendVirtualKey(0x0D);
-                Plugin.PluginLog.LogInfo("Sent search paste to Pear Desktop so YouTube Music opens the requested track.");
+                Plugin.PluginLog.LogInfo("Sent song-title search to Pear Desktop so YouTube Music opens the requested track.");
                 return;
             }
             if (_youtubeMusicPlayNudgeTries == 1)
@@ -1885,6 +1890,7 @@ internal static class DialogueManagerUpdatePatch
         {
         }
         _youtubeMusicPlayUrl = string.Empty;
+        _youtubeMusicSearchText = string.Empty;
         _youtubeMusicClipboardBeforePlay = string.Empty;
     }
 
@@ -1943,26 +1949,15 @@ internal static class DialogueManagerUpdatePatch
                 "新しい音楽は始めていないよ。再生や曲変更のお願いがなかったから、このツールはもう呼ばないで、曲をかけたとも言わないでね。",
                 "Did not start music: the user did not ask to play or change a track. Do not call this tool again, and do not claim you started a playlist."));
         }
-        if (recentlyStarted && !changing)
+        if (YouTubeMusicPlayback.ShouldSkipDuplicatePlay(
+            intent, query, _youtubeMusicLastIntent, _youtubeMusicLastQuery, recentlyStarted, changing))
         {
-            Plugin.PluginLog.LogInfo("Skipped YouTube Music because playback was started recently.");
+            Plugin.PluginLog.LogInfo("Skipped YouTube Music because that request is already playing.");
             return ToolResult(call, false, ApiKeyText(
-                "音樂已經在播了，所以沒有再開另一份播放清單。",
-                "音乐已经在播了，所以没有再开另一份播放列表。",
-                "もう音楽が流れているから、別のプレイリストは開かなかったよ。",
-                "Music is already playing, so I did not start another playlist."));
-        }
-        if (recentlyStarted
-            && YouTubeMusicPlayback.LooksLikeGenericLofiQuery(query)
-            && YouTubeMusicPlayback.LooksLikeGenericLofiQuery(_youtubeMusicLastQuery)
-            && !changing)
-        {
-            Plugin.PluginLog.LogInfo("Skipped a repeat lofi YouTube Music playlist.");
-            return ToolResult(call, false, ApiKeyText(
-                "剛剛已經放了 lofi，所以沒有再開另一份。",
-                "刚刚已经放了 lofi，所以没有再开另一份。",
-                "さっきすでにlofiをかけたから、別のは開かなかったよ。",
-                "Lofi is already playing, so I did not start another playlist."));
+                "這首已經在播了。如果對方要換歌，再用 youtube_music 播放新的歌名。",
+                "这首已经在播了。如果对方要换歌，再用 youtube_music 播放新的歌名。",
+                "それはもう再生中だよ。別の曲に変えてほしいなら、新しい曲名で youtube_music を呼んでね。",
+                "That track is already playing. If the user asked for a different song, call youtube_music with the new title."));
         }
         var success = TryStartYouTubeMusic(intent, query, out var reply);
         return ToolResult(call, success, reply);
@@ -5687,7 +5682,7 @@ internal static class DialogueManagerUpdatePatch
                 && (string.Equals(activeProvider, "Gemini", StringComparison.Ordinal)
                     || string.Equals(activeProvider, "Qwen", StringComparison.Ordinal)))
             {
-                systemInstruction += "\nDesktop agent policy: You may use the declared local desktop tools whenever they help fulfill the user's intent. Prefer tools over asking the user to repeat an exact command, and you may call several independent tools in parallel to complete a routine. Never claim an action succeeded unless its function result says success. All tools operate locally. Never request or expose passwords, API keys, OTPs, clipboard contents, file contents, browsing history, precise location, or personal data. Screenshots stay local except look_at_screen, which attaches the current screen when the user asks you to look at something. Never infer sleep or lock merely because the user says they are tired; call those tools only when the user explicitly asks the computer to sleep or lock. For music, call youtube_music only when the user explicitly asks to play, change, or start a song, playlist, or radio. Never start music unsolicited, never default to lofi/chill playlists, and never start another playlist if music is already playing unless the user asked to change it. If the user asks you to look at the screen, an error, a clip, or League champ select and no screenshot is attached yet, call look_at_screen. For League pick/draft help, also web-search current patch advice. Do not ask for Google passwords. Destructive file operations, closing apps, shutdown, restart, arbitrary typing, arbitrary shortcuts, shell commands, and privilege elevation are unavailable. If a tool is unavailable, explain naturally without pretending it ran.";
+                systemInstruction += "\nDesktop agent policy: You may use the declared local desktop tools whenever they help fulfill the user's intent. Prefer tools over asking the user to repeat an exact command, and you may call several independent tools in parallel to complete a routine. Never claim an action succeeded unless its function result says success. All tools operate locally. Never request or expose passwords, API keys, OTPs, clipboard contents, file contents, browsing history, precise location, or personal data. Screenshots stay local except look_at_screen, which attaches the current screen when the user asks you to look at something. Never infer sleep or lock merely because the user says they are tired; call those tools only when the user explicitly asks the computer to sleep or lock. For music, call youtube_music only when the user explicitly asks to play, change, or start a song, playlist, or radio. Never start music unsolicited and never default to lofi/chill playlists. If they ask for a different song, playlist, or radio, switch even if music is already playing. If the user asks you to look at the screen, an error, a clip, or League champ select and no screenshot is attached yet, call look_at_screen. For League pick/draft help, also web-search current patch advice. Do not ask for Google passwords. Destructive file operations, closing apps, shutdown, restart, arbitrary typing, arbitrary shortcuts, shell commands, and privilege elevation are unavailable. If a tool is unavailable, explain naturally without pretending it ran.";
             }
             if (string.Equals(activeProvider, "Qwen", StringComparison.Ordinal))
             {
@@ -5837,7 +5832,7 @@ internal static class DialogueManagerUpdatePatch
             new { name = ScreenLook.ToolName, description = ScreenLook.ToolDescription, parameters = Parameters(new { }) },
             new { name = "copy_text", description = "Write user-specified non-sensitive text to the local clipboard. Never use for passwords, API keys, OTPs, tokens, private identifiers, or other credentials. Clipboard reading is unavailable.", parameters = Parameters(new { text = new { type = "STRING", description = "The exact non-sensitive text the user explicitly wants copied." } }, "text") },
             new { name = "browser_search", description = "Open the default browser with a Google search. Use when the user explicitly wants results opened in their browser; ordinary factual questions can use Google Search instead.", parameters = Parameters(new { query = new { type = "STRING", description = "Search query explicitly requested by the user." } }, "query") },
-            new { name = "youtube_music", description = "Play a song, playlist, radio, liked music, or library on YouTube Music in Pear Desktop only when the user explicitly asks to play or change music. Never call this unsolicited, never default to lofi, and never start another playlist over music that is already playing. Uses the signed-in Pear Desktop / YouTube Music app, not the web browser. Never ask for a password.", parameters = Parameters(new { intent = new { type = "STRING", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "STRING", description = "Song, artist, or playlist name. Required for song, playlist, and radio. Ignored for liked and library." } }, "intent") },
+            new { name = "youtube_music", description = "Play a song, playlist, radio, liked music, or library on YouTube Music in Pear Desktop only when the user explicitly asks to play or change music. If they ask for a different song, switch even if music is already playing. Never call this unsolicited and never default to lofi. Uses the signed-in Pear Desktop / YouTube Music app, not the web browser. Never ask for a password.", parameters = Parameters(new { intent = new { type = "STRING", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "STRING", description = "Song, artist, or playlist name. Required for song, playlist, and radio. Ignored for liked and library." } }, "intent") },
             new { name = "get_system_status", description = "Read a non-personal local system status value.", parameters = Parameters(new { category = new { type = "STRING", description = "One of: battery, memory, storage, network." } }, "category") },
             new { name = "keyboard_shortcut", description = "Send one allowlisted reversible shortcut to the most recent non-Lilith foreground app. Arbitrary keys and typing are unavailable.", parameters = Parameters(new { action = new { type = "STRING", description = "One of: undo, redo, save, select_all, find, refresh, fullscreen, escape." } }, "action") },
             new { name = "set_timer", description = "Create a local timer that Lilith will announce. Use a duration from 0.1 to 1440 minutes.", parameters = Parameters(new { minutes = new { type = "NUMBER", description = "Timer duration in minutes." }, message = new { type = "STRING", description = "Short announcement when the timer ends; omit personal or sensitive information." } }, "minutes", "message") },
@@ -6468,7 +6463,7 @@ internal static class DialogueManagerUpdatePatch
         tools.Add(new { type = "function", name = ScreenLook.ToolName, description = ScreenLook.ToolDescription, parameters = Parameters(new { }) });
         tools.Add(new { type = "function", name = "copy_text", description = "Write user-specified non-sensitive text to the local clipboard. Never use for passwords, API keys, OTPs, tokens, private identifiers, or other credentials. Clipboard reading is unavailable.", parameters = Parameters(new { text = new { type = "string", description = "The exact non-sensitive text the user explicitly wants copied." } }, "text") });
         tools.Add(new { type = "function", name = "browser_search", description = "Open the default browser with a Google search only when the user asks to see results in their browser. Prefer the built-in web search tool for factual lookups.", parameters = Parameters(new { query = new { type = "string", description = "Search query explicitly requested by the user." } }, "query") });
-        tools.Add(new { type = "function", name = "youtube_music", description = "Play a song, playlist, radio, liked music, or library on YouTube Music in Pear Desktop only when the user explicitly asks to play or change music. Never call this unsolicited, never default to lofi, and never start another playlist over music that is already playing. Uses Pear Desktop, not the browser.", parameters = Parameters(new { intent = new { type = "string", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "string", description = "Song, artist, or playlist name. Required for song, playlist, and radio." } }, "intent") });
+        tools.Add(new { type = "function", name = "youtube_music", description = "Play a song, playlist, radio, liked music, or library on YouTube Music in Pear Desktop only when the user explicitly asks to play or change music. If they ask for a different song, switch even if music is already playing. Never call this unsolicited and never default to lofi. Uses Pear Desktop, not the browser.", parameters = Parameters(new { intent = new { type = "string", description = "One of: song, playlist, radio, liked, library." }, query = new { type = "string", description = "Song, artist, or playlist name. Required for song, playlist, and radio." } }, "intent") });
         tools.Add(new { type = "function", name = "get_system_status", description = "Read a non-personal local system status value.", parameters = Parameters(new { category = new { type = "string", description = "One of: battery, memory, storage, network." } }, "category") });
         tools.Add(new { type = "function", name = "keyboard_shortcut", description = "Send one allowlisted reversible shortcut to the most recent non-Lilith foreground app. Arbitrary keys and typing are unavailable.", parameters = Parameters(new { action = new { type = "string", description = "One of: undo, redo, save, select_all, find, refresh, fullscreen, escape." } }, "action") });
         tools.Add(new { type = "function", name = "set_timer", description = "Create a local timer that Lilith will announce. Use a duration from 0.1 to 1440 minutes.", parameters = Parameters(new { minutes = new { type = "number", description = "Timer duration in minutes." }, message = new { type = "string", description = "Short announcement when the timer ends; omit personal or sensitive information." } }, "minutes", "message") });
