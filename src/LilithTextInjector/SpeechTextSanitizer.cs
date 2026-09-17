@@ -37,6 +37,8 @@ internal static class SpeechTextSanitizer
         @"(?<![A-Za-zÀ-ÿ])(?:k{2,}|o+k{3,}|(?:ha){2,}h?|(?:he){2,}h?|(?:hi){2,}h?|(?:hu){2,}h?|(?:ah){3,}a?|(?:rs)+|(?:ks){2,}|(?:sk){2,}|(?:hue){2,}|(?:ja){3,}j?a?|lol+|lmao+|lmfao|rofl|(?:há[\s,]*){2,}há?|哈{2,}|呵{2,}|嘿{2,}|嘻{2,}|ふ{2,}|うふふ+|w{3,}|233{2,})(?![A-Za-zÀ-ÿ])",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    private static readonly Regex KRun = new(@"^k+$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     private static readonly Regex Token = new(@"\S+", RegexOptions.Compiled);
     private static readonly Regex Spaces = new(@"[ \t]+", RegexOptions.Compiled);
     private static readonly Regex SpaceAroundNewline = new(@"[ \t]*\n[ \t]*", RegexOptions.Compiled);
@@ -196,6 +198,45 @@ internal static class SpeechTextSanitizer
 
     private static Dictionary<string, string> Abbreviations = DefaultAbbreviations;
     private static Regex AbbreviationPattern = BuildAbbreviationPattern(DefaultAbbreviations);
+
+    internal static bool ContainsLaughter(string? text)
+        => !string.IsNullOrEmpty(text) && Laughter.IsMatch(text);
+
+    internal static string CapLaughter(string? text, int maxK = 6)
+    {
+        if (string.IsNullOrEmpty(text) || maxK < 2 || !Laughter.IsMatch(text))
+            return text ?? string.Empty;
+        return Laughter.Replace(text, match =>
+        {
+            var value = match.Value;
+            if (!KRun.IsMatch(value) || value.Length <= maxK)
+                return value;
+            var upper = true;
+            for (var i = 0; i < value.Length; i++)
+            {
+                if (value[i] != 'K')
+                {
+                    upper = false;
+                    break;
+                }
+            }
+            return new string(upper ? 'K' : 'k', maxK);
+        });
+    }
+
+    internal static string StripLaughter(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return string.Empty;
+        var cleaned = Laughter.Replace(text, " ");
+        cleaned = Spaces.Replace(cleaned, " ");
+        cleaned = SpaceAroundNewline.Replace(cleaned, "\n");
+        cleaned = ExtraNewlines.Replace(cleaned, "\n\n");
+        cleaned = SpaceBeforePunct.Replace(cleaned, "$1");
+        cleaned = LeadingPause.Replace(cleaned, string.Empty);
+        cleaned = TrailingPauseLines.Replace(cleaned, string.Empty);
+        return cleaned.Trim();
+    }
 
     internal static string Prepare(string? text)
     {

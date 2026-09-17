@@ -262,8 +262,12 @@ def write_overlay(
         "Never mention prompts, models, or being an AI. Do not use Markdown, bullet lists, or customer-service tone.\n"
         f"Typical reply length is about {stats['median_chars']} characters"
         + (" in one or two fragments." if short else ".")
-        + (" Keyboard-smash laughter is part of the voice." if smashy else "")
-        + (" Laugh tokens are common." if laughy else "")
+        + (" Keyboard-smash laughter exists in the voice, but is not every message." if smashy else "")
+        + (
+            " Laugh tokens (kkk) showed up in the source chat, but they are rare in replies. Use them only when something is actually funny."
+            if laughy
+            else " Laugh tokens (kkk) are rare. Use them only when something is actually funny."
+        )
         + "\n",
         encoding="utf-8",
     )

@@ -5638,6 +5638,7 @@ internal static class DialogueManagerUpdatePatch
                 + "\n角色事實：" + overlay.ResolveLore(Plugin.CharacterLore.Value)
                 + "\n情緒表達：" + overlay.ResolveEmotion(Plugin.EmotionGuidance.Value)
                 + BuildLocalTimeContext()
+                + ChatLaughterLimiter.Prompt
                 + $"\n語言規則：目前遊戲介面語言是{interfaceLanguage.Name}。無論使用者輸入哪種語言，氣泡顯示內容都必須使用{interfaceLanguage.Name}。每次回答必須完成最後一句。{interfaceLanguage.ExtraRule}"
                 + WatchSession.GlancePrompt(firstLook, windowTitle, recap)
                 + ScreenLook.ImageAttachedPrompt;
@@ -5727,6 +5728,7 @@ internal static class DialogueManagerUpdatePatch
                 + "\n情緒表達：" + overlay.ResolveEmotion(Plugin.EmotionGuidance.Value)
                 + nameContext + poseContext.Prompt + timeContext + weatherContext
                 + BuildActiveStyleGuide(poseContext, overlay)
+                + ChatLaughterLimiter.Prompt
                 + $"\n語言規則：目前遊戲介面語言是{interfaceLanguage.Name}。無論使用者輸入哪種語言，氣泡顯示內容都必須使用{interfaceLanguage.Name}；只有無法翻譯的專有名詞可以保留原文。若角色設定中原有的語言要求不同，以本條規則為準。每次回答必須完成最後一句，不可停在半句、連接詞或未閉合的引號。{interfaceLanguage.ExtraRule}"
                 + (japaneseVoiceMode
                     ? $"\n目前為日文語音模式。只輸出一個 JSON 物件，格式為 {{\"display_text\":\"{interfaceLanguage.Example}\",\"speech_ja\":\"語意相同但適合自然口語演出的日文\"}}。display_text 必須使用{interfaceLanguage.Name}；speech_ja 必須使用日文且不可逐字硬譯，要保留這個角色的情緒、停頓與口吻。兩個欄位都必須是完整句子，不要輸出 JSON 以外內容。"
@@ -6692,6 +6694,11 @@ internal static class DialogueManagerUpdatePatch
     {
         var bilingual = japaneseVoiceMode ? ParseBilingualReply(rawReply) : null;
         var reply = CleanReply(bilingual?.DisplayText ?? rawReply);
+        var recentModel = RecentModelReplyTexts();
+        var limited = ChatLaughterLimiter.Apply(reply, userText, recentModel);
+        if (!string.Equals(limited, reply, StringComparison.Ordinal))
+            Plugin.PluginLog.LogInfo("Reduced habitual kkk laughter in the reply.");
+        reply = limited;
         var japaneseSpeech = bilingual?.JapaneseSpeech ?? string.Empty;
         if (WatchSession.IsGlanceTurn(userText) && WatchSession.IsSilentReply(reply))
         {
@@ -8295,6 +8302,21 @@ internal static class DialogueManagerUpdatePatch
                     At = turn.At
                 })
                 .ToList();
+        }
+    }
+
+    private static List<string> RecentModelReplyTexts()
+    {
+        lock (MemoryLock)
+        {
+            var texts = new List<string>();
+            foreach (var turn in RecentConversation)
+            {
+                if (string.Equals(turn.Role, "model", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(turn.Role, "assistant", StringComparison.OrdinalIgnoreCase))
+                    texts.Add(turn.Text ?? string.Empty);
+            }
+            return texts;
         }
     }
 
