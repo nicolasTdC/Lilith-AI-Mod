@@ -1843,7 +1843,6 @@ internal static class DialogueManagerUpdatePatch
         _youtubeMusicPlayNudgeTries++;
         var steps = YouTubeMusicPlayback.PearPlayNudgeSteps(
             YouTubeMusicPlayback.LastOpenUsedPearDesktop,
-            _youtubeMusicPearColdStart,
             _youtubeMusicVideoId.Length,
             _youtubeMusicSearchText.Length);
         if (_youtubeMusicPlayNudgeTries < steps)
@@ -1879,23 +1878,16 @@ internal static class DialogueManagerUpdatePatch
         SetForegroundWindow(window);
         if (YouTubeMusicPlayback.LastOpenUsedPearDesktop && _youtubeMusicVideoId.Length == 11)
         {
-            if (_youtubeMusicPearColdStart && _youtubeMusicPlayNudgeTries <= 1)
-            {
-                YouTubeMusicPlayback.TrySendPearCommand(
-                    "addSongToQueue " + _youtubeMusicVideoId + " INSERT_AFTER_CURRENT_VIDEO");
-                Plugin.PluginLog.LogInfo(_youtubeMusicPlayNudgeTries == 0
-                    ? "Queued the requested track in Pear Desktop after the restored last session."
-                    : "Re-queued the requested track after Pear Desktop finished starting.");
-                return;
-            }
             if (_youtubeMusicPlayNudgeTries == 0)
             {
                 YouTubeMusicPlayback.TrySendPearCommand(
                     "addSongToQueue " + _youtubeMusicVideoId + " INSERT_AFTER_CURRENT_VIDEO");
-                Plugin.PluginLog.LogInfo("Queued the requested track in Pear Desktop after the current song.");
+                Plugin.PluginLog.LogInfo(_youtubeMusicPearColdStart
+                    ? "Queued the requested track in Pear Desktop after the restored last session."
+                    : "Queued the requested track in Pear Desktop after the current song.");
                 return;
             }
-            if (_youtubeMusicPearColdStart ? _youtubeMusicPlayNudgeTries == 2 : _youtubeMusicPlayNudgeTries == 1)
+            if (_youtubeMusicPlayNudgeTries == 1)
             {
                 YouTubeMusicPlayback.TrySendPearCommand("next");
                 Plugin.PluginLog.LogInfo("Skipped to the queued track in Pear Desktop.");

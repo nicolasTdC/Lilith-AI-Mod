@@ -187,11 +187,9 @@ internal static class YouTubeMusicPlayback
         return videoIdLength == 11 ? 1.2f : 3.2f;
     }
 
-    internal static int PearPlayNudgeSteps(bool usedPearDesktop, bool coldStart, int videoIdLength, int searchTextLength)
+    internal static int PearPlayNudgeSteps(bool usedPearDesktop, int videoIdLength, int searchTextLength)
     {
-        if (usedPearDesktop && videoIdLength == 11)
-            return coldStart ? 4 : 3;
-        if (usedPearDesktop && searchTextLength > 0)
+        if (usedPearDesktop && (videoIdLength == 11 || searchTextLength > 0))
             return 3;
         return 2;
     }
