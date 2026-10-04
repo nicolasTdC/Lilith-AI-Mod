@@ -545,6 +545,9 @@ internal static class DialogueManagerUpdatePatch
     private static float _youtubeMusicStartedAt = -999f;
     private static float _youtubeMusicPlayNudgeAt = -1f;
     private static int _youtubeMusicPlayNudgeTries;
+    private static bool _youtubeMusicPearColdStart;
+    private static bool _youtubeMusicNudgeDeferred;
+    private static int _youtubeMusicPearWindowWaitTries;
     private static string _youtubeMusicLastIntent = string.Empty;
     private static string _youtubeMusicLastQuery = string.Empty;
     private static string _youtubeMusicPlayUrl = string.Empty;
@@ -1767,6 +1770,7 @@ internal static class DialogueManagerUpdatePatch
 
     private static bool TryStartYouTubeMusic(string intent, string query, out string reply)
     {
+        var pearAlreadyRunning = YouTubeMusicPlayback.IsPearDesktopRunning();
         var result = YouTubeMusicPlayback.Play(intent, query);
         if (!result.Success)
         {
@@ -1780,14 +1784,16 @@ internal static class DialogueManagerUpdatePatch
         }
 
         _youtubeMusicStartedAt = Time.unscaledTime;
-        _youtubeMusicPlayNudgeAt = Time.unscaledTime + (result.UsedPearDesktop
-            ? (_youtubeMusicVideoId.Length == 11 ? 1.2f : 3.2f)
-            : 2.4f);
         _youtubeMusicPlayNudgeTries = 0;
+        _youtubeMusicPearColdStart = result.UsedPearDesktop && !pearAlreadyRunning;
+        _youtubeMusicNudgeDeferred = false;
+        _youtubeMusicPearWindowWaitTries = 0;
         _youtubeMusicLastIntent = intent ?? string.Empty;
         _youtubeMusicLastQuery = query ?? string.Empty;
         _youtubeMusicPlayUrl = result.Url;
         _youtubeMusicVideoId = result.VideoId ?? string.Empty;
+        _youtubeMusicPlayNudgeAt = Time.unscaledTime + YouTubeMusicPlayback.PearPlayNudgeDelay(
+            result.UsedPearDesktop, _youtubeMusicPearColdStart, _youtubeMusicVideoId.Length);
         _youtubeMusicSearchText = YouTubeMusicPlayback.SearchBarQuery(intent ?? "song", result.Title, query ?? string.Empty);
         if (result.UsedPearDesktop && OperatingSystem.IsWindows() && _youtubeMusicVideoId.Length != 11 && _youtubeMusicSearchText.Length > 0)
         {
@@ -1797,7 +1803,7 @@ internal static class DialogueManagerUpdatePatch
             catch { }
         }
         Plugin.PluginLog.LogInfo(result.UsedPearDesktop
-            ? $"Opened YouTube Music in Pear Desktop ({intent}, queryChars={_youtubeMusicLastQuery.Length}, videoIdChars={_youtubeMusicVideoId.Length})."
+            ? $"Opened YouTube Music in Pear Desktop ({intent}, queryChars={_youtubeMusicLastQuery.Length}, videoIdChars={_youtubeMusicVideoId.Length}, coldStart={_youtubeMusicPearColdStart})."
             : $"Opened YouTube Music in the default browser; Pear Desktop was not found ({intent}, queryChars={_youtubeMusicLastQuery.Length}).");
         reply = intent switch
         {
@@ -1814,6 +1820,7 @@ internal static class DialogueManagerUpdatePatch
     {
         if (_youtubeMusicPlayNudgeAt < 0f || Time.unscaledTime < _youtubeMusicPlayNudgeAt)
             return;
+        _youtubeMusicNudgeDeferred = false;
         try
         {
             if (OperatingSystem.IsWindows())
@@ -1827,13 +1834,21 @@ internal static class DialogueManagerUpdatePatch
             return;
         }
 
+        if (_youtubeMusicNudgeDeferred)
+        {
+            _youtubeMusicPlayNudgeAt = Time.unscaledTime + 1.5f;
+            return;
+        }
+
         _youtubeMusicPlayNudgeTries++;
-        var extraSearchTries = YouTubeMusicPlayback.LastOpenUsedPearDesktop
-            && (_youtubeMusicVideoId.Length == 11 || _youtubeMusicSearchText.Length > 0)
-            ? 1
-            : 0;
-        if (_youtubeMusicPlayNudgeTries < 2 + extraSearchTries)
-            _youtubeMusicPlayNudgeAt = Time.unscaledTime + (_youtubeMusicPlayNudgeTries == 1 ? 2.2f : 1.2f);
+        var steps = YouTubeMusicPlayback.PearPlayNudgeSteps(
+            YouTubeMusicPlayback.LastOpenUsedPearDesktop,
+            _youtubeMusicPearColdStart,
+            _youtubeMusicVideoId.Length,
+            _youtubeMusicSearchText.Length);
+        if (_youtubeMusicPlayNudgeTries < steps)
+            _youtubeMusicPlayNudgeAt = Time.unscaledTime + YouTubeMusicPlayback.PearPlayNudgeInterval(
+                _youtubeMusicPlayNudgeTries, _youtubeMusicPearColdStart);
         else
         {
             RestoreYouTubeMusicClipboard();
@@ -1846,6 +1861,15 @@ internal static class DialogueManagerUpdatePatch
         const uint WmAppCommand = 0x0319;
         const int AppCommandMediaPlay = 46;
         var window = FindNewestPearDesktopWindow();
+        if (YouTubeMusicPlayback.LastOpenUsedPearDesktop
+            && window == IntPtr.Zero
+            && _youtubeMusicPearWindowWaitTries < 10)
+        {
+            _youtubeMusicPearWindowWaitTries++;
+            _youtubeMusicNudgeDeferred = true;
+            Plugin.PluginLog.LogInfo("Waiting for Pear Desktop's window before sending play commands.");
+            return;
+        }
         if (window == IntPtr.Zero)
             window = FindNewestBrowserWindow();
         if (window == IntPtr.Zero)
@@ -1855,6 +1879,15 @@ internal static class DialogueManagerUpdatePatch
         SetForegroundWindow(window);
         if (YouTubeMusicPlayback.LastOpenUsedPearDesktop && _youtubeMusicVideoId.Length == 11)
         {
+            if (_youtubeMusicPearColdStart && _youtubeMusicPlayNudgeTries <= 1)
+            {
+                YouTubeMusicPlayback.TrySendPearCommand(
+                    "addSongToQueue " + _youtubeMusicVideoId + " INSERT_AFTER_CURRENT_VIDEO");
+                Plugin.PluginLog.LogInfo(_youtubeMusicPlayNudgeTries == 0
+                    ? "Queued the requested track in Pear Desktop after the restored last session."
+                    : "Re-queued the requested track after Pear Desktop finished starting.");
+                return;
+            }
             if (_youtubeMusicPlayNudgeTries == 0)
             {
                 YouTubeMusicPlayback.TrySendPearCommand(
@@ -1862,7 +1895,7 @@ internal static class DialogueManagerUpdatePatch
                 Plugin.PluginLog.LogInfo("Queued the requested track in Pear Desktop after the current song.");
                 return;
             }
-            if (_youtubeMusicPlayNudgeTries == 1)
+            if (_youtubeMusicPearColdStart ? _youtubeMusicPlayNudgeTries == 2 : _youtubeMusicPlayNudgeTries == 1)
             {
                 YouTubeMusicPlayback.TrySendPearCommand("next");
                 Plugin.PluginLog.LogInfo("Skipped to the queued track in Pear Desktop.");

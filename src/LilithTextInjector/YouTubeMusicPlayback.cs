@@ -162,6 +162,47 @@ internal static class YouTubeMusicPlayback
         }
     }
 
+    internal static bool IsPearDesktopRunning()
+    {
+        foreach (var name in PearDesktopProcessNames)
+        {
+            Process[] processes;
+            try { processes = Process.GetProcessesByName(name); }
+            catch { continue; }
+            var running = processes.Length > 0;
+            foreach (var process in processes)
+                process.Dispose();
+            if (running)
+                return true;
+        }
+        return false;
+    }
+
+    internal static float PearPlayNudgeDelay(bool usedPearDesktop, bool coldStart, int videoIdLength)
+    {
+        if (!usedPearDesktop)
+            return 2.4f;
+        if (coldStart)
+            return 8f;
+        return videoIdLength == 11 ? 1.2f : 3.2f;
+    }
+
+    internal static int PearPlayNudgeSteps(bool usedPearDesktop, bool coldStart, int videoIdLength, int searchTextLength)
+    {
+        if (usedPearDesktop && videoIdLength == 11)
+            return coldStart ? 4 : 3;
+        if (usedPearDesktop && searchTextLength > 0)
+            return 3;
+        return 2;
+    }
+
+    internal static float PearPlayNudgeInterval(int completedTries, bool coldStart)
+    {
+        if (coldStart)
+            return completedTries <= 1 ? 2.5f : 1.8f;
+        return completedTries == 1 ? 2.2f : 1.2f;
+    }
+
     internal static void OpenInDefaultBrowser(string playUrl)
     {
         Process.Start(new ProcessStartInfo(playUrl) { UseShellExecute = true });
