@@ -81,7 +81,7 @@ Assert(YouTubeMusicPlayback.PearProtocolUri("youtubemusic", "addSongToQueue Gg5H
     "Pear protocol commands should keep spaces encoded.");
 Assert(YouTubeMusicPlayback.PearProtocolUri("youtubemusic", "play") == "youtubemusic://play",
     "Play commands should use the Pear Desktop protocol.");
-Assert(YouTubeMusicPlayback.PearPlayNudgeDelay(true, true, 11) == 8f,
+Assert(YouTubeMusicPlayback.PearPlayNudgeDelay(true, true, 11) == 12f,
     "A closed Pear Desktop session should wait for the last-session restore before queueing.");
 Assert(YouTubeMusicPlayback.PearPlayNudgeDelay(true, false, 11) == 1.2f,
     "An already-open Pear Desktop should queue promptly.");
@@ -103,8 +103,14 @@ Assert(YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "lofi beats", "playl
     "A second generic lofi request should stay skipped.");
 Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("song", "lofi beats", "playlist", "lofi girl", true, true),
     "An explicit change request should replace even generic lofi.");
+Assert(!YouTubeMusicPlayback.ShouldSkipDuplicatePlay("playlist", "same song", "playlist", "same song", true, false, false),
+    "A play that never queued a track should not block the next attempt.");
+Assert(YouTubeMusicPlayback.ShouldPlayAsSong("playlist", "poe no youtube music a musica butterfly da loona"),
+    "A song request must not stay a playlist just because the model labeled it that way.");
+Assert(!YouTubeMusicPlayback.ShouldPlayAsSong("playlist", "play my lofi playlist"),
+    "An explicit playlist request should stay a playlist.");
 
-Console.WriteLine("YouTube Music ID parsing tests passed (51 assertions).");
+Console.WriteLine("YouTube Music ID parsing tests passed (54 assertions).");
 
 static void Assert(bool condition, string message)
 {

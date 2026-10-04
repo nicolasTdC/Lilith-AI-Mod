@@ -547,6 +547,8 @@ internal static class DialogueManagerUpdatePatch
     private static int _youtubeMusicPlayNudgeTries;
     private static bool _youtubeMusicPearColdStart;
     private static bool _youtubeMusicNudgeDeferred;
+    private static bool _youtubeMusicPearRevealed;
+    private static bool _youtubeMusicQueuedATrack;
     private static int _youtubeMusicPearWindowWaitTries;
     private static string _youtubeMusicLastIntent = string.Empty;
     private static string _youtubeMusicLastQuery = string.Empty;
@@ -1787,6 +1789,8 @@ internal static class DialogueManagerUpdatePatch
         _youtubeMusicPlayNudgeTries = 0;
         _youtubeMusicPearColdStart = result.UsedPearDesktop && !pearAlreadyRunning;
         _youtubeMusicNudgeDeferred = false;
+        _youtubeMusicPearRevealed = false;
+        _youtubeMusicQueuedATrack = false;
         _youtubeMusicPearWindowWaitTries = 0;
         _youtubeMusicLastIntent = intent ?? string.Empty;
         _youtubeMusicLastQuery = query ?? string.Empty;
@@ -1861,6 +1865,14 @@ internal static class DialogueManagerUpdatePatch
         const int AppCommandMediaPlay = 46;
         var window = FindNewestPearDesktopWindow();
         if (YouTubeMusicPlayback.LastOpenUsedPearDesktop
+            && _youtubeMusicPearColdStart
+            && !_youtubeMusicPearRevealed)
+        {
+            _youtubeMusicPearRevealed = true;
+            YouTubeMusicPlayback.TryRevealPearDesktop();
+            Plugin.PluginLog.LogInfo("Asked Pear Desktop to show its window.");
+        }
+        if (YouTubeMusicPlayback.LastOpenUsedPearDesktop
             && window == IntPtr.Zero
             && _youtubeMusicPearWindowWaitTries < 10)
         {
@@ -1882,6 +1894,7 @@ internal static class DialogueManagerUpdatePatch
             {
                 YouTubeMusicPlayback.TrySendPearCommand(
                     "addSongToQueue " + _youtubeMusicVideoId + " INSERT_AFTER_CURRENT_VIDEO");
+                _youtubeMusicQueuedATrack = true;
                 Plugin.PluginLog.LogInfo(_youtubeMusicPearColdStart
                     ? "Queued the requested track in Pear Desktop after the restored last session."
                     : "Queued the requested track in Pear Desktop after the current song.");
@@ -1996,6 +2009,8 @@ internal static class DialogueManagerUpdatePatch
             intent = "song";
         var artist = GetToolString(call.Args, "artist", 120);
         query = YouTubeMusicPlayback.EnsureSongAndArtistQuery(query, artist);
+        if (YouTubeMusicPlayback.ShouldPlayAsSong(intent, userText))
+            intent = "song";
         var previousUserText = GetPreviousUserText(userText);
         var retry = YouTubeMusicPlayback.LooksLikeRetryMusicPrompt(userText);
         var asked = YouTubeMusicPlayback.UserAskedToPlayOrChangeMusic(userText, previousUserText);
@@ -2026,7 +2041,7 @@ internal static class DialogueManagerUpdatePatch
                 "Did not start music: the user did not ask to play or change a track. Do not call this tool again, and do not claim you started a playlist."));
         }
         if (YouTubeMusicPlayback.ShouldSkipDuplicatePlay(
-            intent, query ?? string.Empty, _youtubeMusicLastIntent, _youtubeMusicLastQuery, recentlyStarted, changing))
+            intent, query ?? string.Empty, _youtubeMusicLastIntent, _youtubeMusicLastQuery, recentlyStarted, changing, _youtubeMusicQueuedATrack))
         {
             Plugin.PluginLog.LogInfo("Skipped YouTube Music because that request is already playing.");
             return ToolResult(call, false, ApiKeyText(

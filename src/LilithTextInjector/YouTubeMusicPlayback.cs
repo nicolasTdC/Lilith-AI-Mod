@@ -183,7 +183,7 @@ internal static class YouTubeMusicPlayback
         if (!usedPearDesktop)
             return 2.4f;
         if (coldStart)
-            return 8f;
+            return 12f;
         return videoIdLength == 11 ? 1.2f : 3.2f;
     }
 
@@ -228,6 +228,16 @@ internal static class YouTubeMusicPlayback
 
     internal static bool TryOpenInPearDesktop(string playUrl)
     {
+        return StartPearDesktop(playUrl);
+    }
+
+    internal static bool TryRevealPearDesktop()
+    {
+        return StartPearDesktop(null);
+    }
+
+    private static bool StartPearDesktop(string? playUrl)
+    {
         var target = FindPearDesktopTarget();
         if (string.IsNullOrWhiteSpace(target))
             return false;
@@ -237,7 +247,8 @@ internal static class YouTubeMusicPlayback
             {
                 UseShellExecute = true
             };
-            if (string.Equals(Path.GetExtension(target), ".exe", StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrWhiteSpace(playUrl)
+                && string.Equals(Path.GetExtension(target), ".exe", StringComparison.OrdinalIgnoreCase))
                 start.Arguments = QuoteArgument(playUrl);
             Process.Start(start);
             return true;
@@ -699,15 +710,32 @@ internal static class YouTubeMusicPlayback
             && string.Equals(normalized, lastNormalized, StringComparison.Ordinal);
     }
 
+    internal static bool UserAskedForPlaylist(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+        return Regex.IsMatch(
+            text,
+            @"playlist|播放清單|播放列表|プレイリスト",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
+    internal static bool ShouldPlayAsSong(string? intent, string? userText)
+    {
+        return string.Equals(NormalizeIntent(intent), "playlist", StringComparison.Ordinal)
+            && !UserAskedForPlaylist(userText);
+    }
+
     internal static bool ShouldSkipDuplicatePlay(
         string intent,
         string query,
         string lastIntent,
         string lastQuery,
         bool recentlyStarted,
-        bool askedToChange)
+        bool askedToChange,
+        bool lastAttemptQueuedTrack = true)
     {
-        if (!recentlyStarted)
+        if (!recentlyStarted || !lastAttemptQueuedTrack)
             return false;
         if (LooksLikeSamePlayRequest(intent, query, lastIntent, lastQuery))
             return true;
